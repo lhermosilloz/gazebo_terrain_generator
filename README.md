@@ -138,6 +138,13 @@ gz sim <path to gazbo_terrain_generator>/sample_worlds/applepark/applepark.world
 gz sim <path to gazbo_terrain_generator>/sample_worlds/Joshimath/Joshimath.world
 ```
 
+## Roadmap
+
+- Spawning multiple drones / robots (single helipad)
+- Friction components to the ground
+- Roads are not smooth (explore Terminus)
+- Generating forest based on ortho image vegetation masks (Blender plugin)
+
 ## Contributors
 
 Special thanks to [Karinca Robotics](https://karincarobotics.com) and [Polymath Robotics](https://polymathrobotics.com).
