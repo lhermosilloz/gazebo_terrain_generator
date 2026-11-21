@@ -8,6 +8,7 @@ from utils.param import GlobalParam
 from utils.maptile_utils import MapTileUtils
 from utils.buildings_generator import GeoJSONToDAE
 from utils.height_map_generator import HeightmapGenerator
+from utils.road_smoother import DEFAULT_SMOOTHING_LENGTH_M, DEFAULT_SHOULDER_WIDTH_M
 from utils.utils import ConcatImage
 from utils.spawn_points import spawn_feature_active, frame_names
 from geopy.distance import geodesic
@@ -119,7 +120,8 @@ class OrthoGenerator(ConcatImage):
 
 class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
     def __init__(self, tile_path: str, include_buildings: bool, heightmap_z_resolution: int, gazebo_version: str, target_heightmap_size: int, include_helipad: bool = False, helipad_height: float = 5.0,
-                 friction_coefficient: float = None, spawn_points: list = None, spawn_helipad_all: bool = True, **kwargs):
+                 friction_coefficient: float = None, spawn_points: list = None, spawn_helipad_all: bool = True,
+                 roads_smooth: bool = True, roads_smoothing_length: float = DEFAULT_SMOOTHING_LENGTH_M, roads_shoulder_width: float = DEFAULT_SHOULDER_WIDTH_M, **kwargs):
         super().__init__(**kwargs)
         self.tile_path = tile_path
         self.include_buildings = include_buildings
@@ -135,6 +137,10 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
         self.target_heightmap_size = target_heightmap_size
         # Ground friction coefficient (mu); None keeps Gazebo's default friction.
         self.friction_coefficient = friction_coefficient
+        # Road smoothing: uses {tile_path}/roads.geojson when present (see road_smoother)
+        self.roads_smooth = roads_smooth
+        self.roads_smoothing_length = roads_smoothing_length
+        self.roads_shoulder_width = roads_shoulder_width
         with open(os.path.join(self.tile_path, 'metadata.json')) as f:
             data = json.load(f)
             self.boundaries = data["bounds"]
@@ -434,6 +440,8 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
 
             progress("Processing heightmap...")
             self.generate_rgb_heightmap(self.tile_path, self.boundaries, self.zoom_level, os.path.join(self.tile_path, 'dem'), self.dem_resolution, self.target_heightmap_size)
+            if self.roads_smooth:
+                progress(self.road_smoothing_summary())
 
             progress("Computing world dimensions...")
             (size_x, size_y, size_z, pose_x, pose_y, pose_z) = self.get_world_dimensions()
