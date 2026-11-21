@@ -208,6 +208,32 @@ class RoadSmootherTest(unittest.TestCase):
         self.assertTrue(np.allclose(out[126, 30:227], out[130, 30:227], atol=1e-9))
         self.assertTrue(np.allclose(out[126, 30:227], plane[128, 30:227], atol=1e-9))
 
+    def _assert_grade_kept(self, pieces, label):
+        # Straight 9 m road running east along row 256 of a 6 % plane, given as `pieces`
+        # (start/end columns). The grade must survive joins, seams and short pieces.
+        rows = cols = 513
+        size = 1000.0
+        x = np.linspace(0, size, cols)[None, :]
+        plane = 0.06 * x + 0.0 * np.linspace(0, size, rows)[:, None]
+        road = [(np.array([[a, 256.0], [b, 256.0]]), 9.0) for a, b in pieces]
+        out, _ = smooth_roads(plane, road, size, size, smoothing_length=80.0, shoulder_width=4.0)
+        centre = out[256, 20:493]
+        grade = np.diff(centre) / (size / (cols - 1)) * 100.0
+        self.assertTrue(np.allclose(grade, 6.0, atol=1e-6), f'{label}: grade {grade.min():.3f}..{grade.max():.3f} %')
+        self.assertTrue(np.allclose(centre, plane[256, 20:493], atol=1e-6), label)
+        self.assertTrue(np.allclose(out[254, 20:493], out[258, 20:493], atol=1e-6), label)  # flat across
+
+    def test_tile_seam_keeps_grade(self):
+        # Vector tiles are clipped at tile edges, so a road arrives in pieces with a small
+        # gap between their ends. The seam must not put a step into the road.
+        self._assert_grade_kept([(5.0, 200.37), (200.47, 507.0)], '0.2 m seam gap')
+
+    def test_short_pieces_keep_grade(self):
+        # Noding at junctions and OSM way splits give pieces sampled at different spacings.
+        self._assert_grade_kept([(5.0, 200.37), (200.37, 200.67), (200.67, 507.0)], '0.3 px piece')
+        cuts = [5.0] + list(np.arange(200.37, 230.0, 1.37)) + [507.0]
+        self._assert_grade_kept(list(zip(cuts[:-1], cuts[1:])), 'many short pieces')
+
     def test_no_roads_is_identity(self):
         T = self.terrain
         empty = {'type': 'FeatureCollection', 'features': []}

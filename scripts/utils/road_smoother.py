@@ -12,8 +12,9 @@ module conditions the heightmap along road corridors before the PNG is written:
 2. The lines are noded into a network and sampled about once per heightmap pixel. The
    terrain height is read at every sample and the profile is smoothed on the network by
    solving   (I + lam * D^T D) h = z,   where D measures how far each sample sits from
-   the mean of its neighbours (a discrete curvature). This keeps grades (a straight
-   ramp has zero curvature), removes bumps shorter than ``smoothing_length``, and makes
+   the distance-weighted mean of its neighbours (a discrete curvature, weighted by the
+   road length each sample stands for). This keeps grades (a straight ramp has zero
+   curvature at any sample spacing), removes bumps shorter than ``smoothing_length``, and makes
    roads that meet at a junction share one height there.
 3. Each corridor is flattened across to the smoothed centerline height and feathered
    back into the original terrain over ``shoulder_width``. Pixels farther than
@@ -211,13 +212,24 @@ def _build_network(lines, ds, link_tol):
     node_seg = np.concatenate(node_seg)
     edges = np.vstack(edges)
 
-    # Link segment ends to nearby nodes of other segments. Vector-tile clipping and
-    # simplification leave sub-metre gaps at tile seams and some junctions.
+    # Join segment ends to nearby nodes of other segments. Vector-tile clipping and
+    # simplification leave sub-metre gaps at tile seams and some junctions. The end is
+    # merged into the closest such node (another segment's end first) rather than linked
+    # by an extra edge: a near-zero-length edge would count as a full sample step in the
+    # profile smoothing and put a step of about grade x ds into the road at every seam.
     end_ids = np.fromiter(endpoint_segs.keys(), dtype=np.int64)
     tree = cKDTree(nodes)
-    extra = []
+    parent = np.arange(len(nodes))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
     for end_id, near in zip(end_ids, tree.query_ball_point(nodes[end_ids], r=link_tol)):
         segs = endpoint_segs[end_id]
+        best = None
         for j in near:
             if j == end_id:
                 continue
@@ -225,27 +237,57 @@ def _build_network(lines, ds, link_tol):
                 continue  # interior node of a segment this endpoint is already on
             if node_seg[j] < 0 and endpoint_segs[j] & segs:
                 continue  # other end of a (very short) segment this endpoint is already on
-            extra.append((end_id, j))
-    if extra:
-        edges = np.vstack([edges, np.asarray(extra, dtype=np.int64)])
+            key = (bool(node_seg[j] >= 0), float(np.sum((nodes[j] - nodes[end_id]) ** 2)))
+            if best is None or key < best[0]:
+                best = (key, j)
+        if best is not None:
+            a, b = find(end_id), find(best[1])
+            if a != b:
+                parent[a] = b
+    while True:  # resolve every node to its representative
+        grand = parent[parent]
+        if np.array_equal(grand, parent):
+            break
+        parent = grand
+    edges = parent[edges]
+    seg_nodes = [parent[ids] for ids in seg_nodes]
     edges = edges[edges[:, 0] != edges[:, 1]]
     return nodes, edges, seg_nodes
 
 
-def _smooth_profile(z, edges, n_nodes, lam):
-    """Solve (I + lam * D^T D) h = z on the road graph."""
-    i, j = edges[:, 0], edges[:, 1]
-    adj = sparse.coo_matrix((np.ones(len(i) * 2), (np.concatenate([i, j]), np.concatenate([j, i]))),
-                            shape=(n_nodes, n_nodes)).tocsr()
-    adj.data[:] = 1.0  # collapse duplicate edges
-    deg = np.asarray(adj.sum(axis=1)).ravel()
+def _smooth_profile(z, nodes, edges, lam_c):
+    """
+    Smooth the sampled heights on the road graph.
+
+    Minimises  sum_i m_i (h_i - z_i)^2 + lam_c * sum_i m_i (h''_i)^2,  where m_i is the
+    length of road node i stands for (half its edges) and h''_i the second derivative
+    from its neighbours weighted by inverse distance. That derivative is exactly zero on
+    a straight grade whatever the node spacing, so joins between pieces sampled at
+    different spacings do not kink the road. Nodes with fewer than two neighbours (dead
+    ends) get no curvature term, so grades run to the end. On a uniform chain this is
+    (I + lam D^T D) h = z with lam = 4 lam_c / ds^4.
+    """
+    n_nodes = len(z)
+    e = np.unique(np.sort(edges, axis=1), axis=0)  # collapse duplicate edges
+    e = e[e[:, 0] != e[:, 1]]
+    if len(e) == 0:
+        return z.copy()
+    length = np.hypot(*(nodes[e[:, 0]] - nodes[e[:, 1]]).T)
+    length = np.maximum(length, 1e-3 * np.median(length) + 1e-9)
+    i = np.concatenate([e[:, 0], e[:, 1]])
+    j = np.concatenate([e[:, 1], e[:, 0]])
+    inv_len = np.concatenate([1.0 / length, 1.0 / length])
+    deg = np.bincount(i, minlength=n_nodes)
+    len_sum = np.bincount(i, weights=np.concatenate([length, length]), minlength=n_nodes)
+    inv_sum = np.bincount(i, weights=inv_len, minlength=n_nodes)
     rows = np.flatnonzero(deg >= 2)  # free ends get no curvature penalty (keeps grades to the end)
     if len(rows) == 0:
         return z.copy()
-    inv_deg = sparse.diags(1.0 / np.maximum(deg, 1.0))
-    d_op = (sparse.identity(n_nodes, format='csr') - inv_deg @ adj)[rows]
-    system = (sparse.identity(n_nodes, format='csc') + lam * (d_op.T @ d_op)).tocsc()
-    return spsolve(system, z)
+    m = np.where(len_sum > 0, 0.5 * len_sum, 1.0)  # nodes merged away keep h = z
+    weights = sparse.coo_matrix((inv_len, (i, j)), shape=(n_nodes, n_nodes)).tocsr()
+    curv = (sparse.diags(2.0 / np.maximum(len_sum, 1e-12)) @ (weights - sparse.diags(inv_sum))).tocsr()[rows]
+    system = (sparse.diags(m) + lam_c * (curv.T @ sparse.diags(m[rows]) @ curv)).tocsc()
+    return spsolve(system, m * z)
 
 
 def _chunks(seg_nodes, seg_width, min_half_width, shoulder, ds):
@@ -358,8 +400,9 @@ def smooth_roads(height, roads, size_x, size_y,
     nodes, edges, seg_nodes = _build_network(segments, ds, link_tol=max(1.0, 0.5 * ds))
     z = map_coordinates(h, [nodes[:, 1] / sy, nodes[:, 0] / sx], order=1, mode='nearest')
     k_cut = 2.0 * math.pi / smoothing_length
-    lam = 4.0 / (k_cut * ds) ** 4  # chain response 1 / (1 + lam (1 - cos(k ds))^2) = 1/2 at k_cut
-    zs = _smooth_profile(z, edges, len(nodes), lam)
+    # Response 1 / (1 + (k / k_cut)^4) (on a uniform chain: 1 / (1 + lam (1 - cos(k ds))^2)
+    # with lam = 4 / (k_cut ds)^4), i.e. 1/2 at the smoothing length.
+    zs = _smooth_profile(z, nodes, edges, k_cut ** -4)
 
     # --- 4. Rasterise corridors chunk by chunk with exact point-to-segment distances ---
     # Each pixel near a chunk gets the lateral distance to it and the smoothed height at
