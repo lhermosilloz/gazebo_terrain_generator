@@ -7,6 +7,7 @@ Run from the repo root:
 import math
 import os
 import sys
+import tracemalloc
 import unittest
 
 import numpy as np
@@ -14,6 +15,7 @@ from scipy.ndimage import gaussian_filter, map_coordinates
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts'))
 
+from utils import road_smoother  # noqa: E402
 from utils.road_smoother import (  # noqa: E402
     roads_from_geojson, smooth_heightmap_roads, smooth_roads, road_width_m,
 )
@@ -219,6 +221,32 @@ class RoadSmootherTest(unittest.TestCase):
         out, stats = smooth_heightmap_roads(u8, self.geojson, T.bounds, T.size_x, T.size_y)
         self.assertEqual(out.dtype, np.uint8)
         self.assertGreater(stats['pixels_changed'], 0)
+
+    def test_band_size_does_not_change_result(self):
+        T = self.terrain
+        saved = road_smoother.RASTER_MAX_ELEMENTS
+        try:
+            road_smoother.RASTER_MAX_ELEMENTS = 1000  # forces one row per band
+            out, _ = smooth_heightmap_roads(
+                T.u16, self.geojson, T.bounds, T.size_x, T.size_y, smoothing_length=80.0, shoulder_width=4.0)
+        finally:
+            road_smoother.RASTER_MAX_ELEMENTS = saved
+        self.assertTrue(np.array_equal(out, self.result))
+
+    def test_wide_shoulder_on_fine_heightmap_has_bounded_memory(self):
+        # 200 m area at 513 px (0.39 m pixels) with a 40 m shoulder: unbanded, one chunk
+        # allocated over 3 GB of (rows, cols, segments) work arrays.
+        n, size = 513, 200.0
+        height = np.random.default_rng(0).random((n, n)) * 1000.0
+        roads = [(np.array([[0.0, 0.0], [n - 1.0, n - 1.0]]), 14.0)]
+        tracemalloc.start()
+        try:
+            _, stats = smooth_roads(height, roads, size, size, smoothing_length=80.0, shoulder_width=40.0)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertGreater(stats['pixels_changed'], 0)
+        self.assertLess(peak, 400 * 2 ** 20)
 
 
 if __name__ == '__main__':

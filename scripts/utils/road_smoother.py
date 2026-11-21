@@ -78,6 +78,11 @@ ROAD_TYPE_WIDTHS_M = {
 # Elevated or underground ways do not follow the terrain surface.
 SKIP_STRUCTURES = {'bridge', 'tunnel'}
 
+# Upper bound on the (rows, cols, segments) work arrays built per rasterisation step
+# (~32 MB each in float64). Wide shoulders on fine heightmaps (small areas, large target
+# sizes) would otherwise need several GB for a single chunk.
+RASTER_MAX_ELEMENTS = 1 << 22
+
 
 def road_width_m(properties):
     """Return the paved width in metres for a road feature, or None to skip it."""
@@ -378,31 +383,37 @@ def smooth_roads(height, roads, size_x, size_y,
         if c0 >= c1 or r0 >= r1:
             continue
         gx = (np.arange(c0, c1) * sx)[None, :, None]
-        gy = (np.arange(r0, r1) * sy)[:, None, None]
         a = p[:-1]
         ab = p[1:] - a
         len2 = np.maximum((ab ** 2).sum(axis=1), 1e-12)
-        # (rows, cols, segments) projection parameter, clamped to each segment
-        t = np.clip(((gx - a[:, 0]) * ab[:, 0] + (gy - a[:, 1]) * ab[:, 1]) / len2, 0.0, 1.0)
-        d2 = (gx - a[:, 0] - t * ab[:, 0]) ** 2 + (gy - a[:, 1] - t * ab[:, 1]) ** 2
-        k = np.argmin(d2, axis=2)[..., None]
-        d = np.sqrt(np.take_along_axis(d2, k, axis=2)[..., 0])
-        tk = np.take_along_axis(t, k, axis=2)[..., 0]
-        k = k[..., 0]
-        target = ph[k] + tk * (ph[k + 1] - ph[k])
-        w = _smoothstep_falloff(d, half_width, shoulder)
-        # The polyline runs past the chunk into its neighbours; a pixel belongs to the
-        # chunk whose own part holds its closest point, so joints leave no seams.
-        w[(k < own_lo) | (k >= own_hi)] = 0.0
-        # Beyond a real end (dead end, junction) pixels project onto the end node. Such a
-        # cap still counts for coverage but must not pull the height of a pixel that
-        # projects inside another road.
-        capped = ((k == 0) & (tk <= 0.0)) | ((k == len(cid) - 2) & (tk >= 1.0))
-        pw = w ** 4 * np.where(capped, 1e-3, 1.0)
-        win = (slice(r0, r1), slice(c0, c1))
-        np.maximum(w_max[win], w, out=w_max[win], casting='unsafe')
-        p_sum[win] += pw
-        pt_sum[win] += pw * target
+        # Process the window in row bands so the work arrays stay bounded; every pixel is
+        # independent, so the result does not depend on the band size.
+        band = max(1, RASTER_MAX_ELEMENTS // ((c1 - c0) * len(a)))
+        for rb0 in range(r0, r1, band):
+            rb1 = min(rb0 + band, r1)
+            gy = (np.arange(rb0, rb1) * sy)[:, None, None]
+            # (rows, cols, segments) projection parameter, clamped to each segment
+            t = np.clip(((gx - a[:, 0]) * ab[:, 0] + (gy - a[:, 1]) * ab[:, 1]) / len2, 0.0, 1.0)
+            d2 = (gx - a[:, 0] - t * ab[:, 0]) ** 2 + (gy - a[:, 1] - t * ab[:, 1]) ** 2
+            k = np.argmin(d2, axis=2)[..., None]
+            d = np.sqrt(np.take_along_axis(d2, k, axis=2)[..., 0])
+            tk = np.take_along_axis(t, k, axis=2)[..., 0]
+            del t, d2
+            k = k[..., 0]
+            target = ph[k] + tk * (ph[k + 1] - ph[k])
+            w = _smoothstep_falloff(d, half_width, shoulder)
+            # The polyline runs past the chunk into its neighbours; a pixel belongs to the
+            # chunk whose own part holds its closest point, so joints leave no seams.
+            w[(k < own_lo) | (k >= own_hi)] = 0.0
+            # Beyond a real end (dead end, junction) pixels project onto the end node. Such a
+            # cap still counts for coverage but must not pull the height of a pixel that
+            # projects inside another road.
+            capped = ((k == 0) & (tk <= 0.0)) | ((k == len(cid) - 2) & (tk >= 1.0))
+            pw = w ** 4 * np.where(capped, 1e-3, 1.0)
+            win = (slice(rb0, rb1), slice(c0, c1))
+            np.maximum(w_max[win], w, out=w_max[win], casting='unsafe')
+            p_sum[win] += pw
+            pt_sum[win] += pw * target
 
     # --- 5. Blend: flat smoothed road inside, feathered shoulder, untouched beyond ---
     out = h.copy()
