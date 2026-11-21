@@ -1,0 +1,30 @@
+        <!-- ===================== -->
+        <!-- Trees (procedural forest from the satellite vegetation mask) -->
+        <!-- ===================== -->
+        <model name="$MODELNAME$_trees">
+            <static>true</static>
+            <!-- Tree vertices are baked in world coordinates (launch point = origin), so the pose is identity. -->
+            <pose>0 0 0 0 0 0</pose>
+            <link name="trees">
+                <!-- All trees in one mesh; each crown colour and the trunks are separate sub-meshes
+                     with their own COLLADA material, so no SDF <material> here. -->
+                <visual name="trees_visual">
+                    <geometry>
+                        <mesh>
+                            <uri>mesh/trees.dae</uri>
+                            <scale>1 1 1</scale>
+                        </mesh>
+                    </geometry>
+                </visual>
+                <!-- Trunks only: robots collide with trunks, while crowns stay visual so drones and
+                     sensors behave as they would under real foliage. -->
+                <collision name="trunks_collision">
+                    <geometry>
+                        <mesh>
+                            <uri>mesh/trees_collision.dae</uri>
+                            <scale>1 1 1</scale>
+                        </mesh>
+                    </geometry>
+                </collision>
+            </link>
+        </model>

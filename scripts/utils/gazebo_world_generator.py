@@ -6,6 +6,7 @@ from utils.file_writer import FileWriter
 from utils.param import GlobalParam
 from utils.maptile_utils import MapTileUtils
 from utils.buildings_generator import GeoJSONToDAE
+from utils.forest_generator import ForestGenerator
 from utils.height_map_generator import HeightmapGenerator
 from utils.utils import ConcatImage
 from geopy.distance import geodesic
@@ -116,12 +117,16 @@ class OrthoGenerator(ConcatImage):
 
 
 class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
-    def __init__(self, tile_path: str, include_buildings: bool, heightmap_z_resolution: int, gazebo_version: str, target_heightmap_size: int, include_helipad: bool = False, helipad_height: float = 5.0, **kwargs):
+    def __init__(self, tile_path: str, include_buildings: bool, heightmap_z_resolution: int, gazebo_version: str, target_heightmap_size: int, include_helipad: bool = False, helipad_height: float = 5.0,
+                 include_trees: bool = True, trees_density: float = ForestGenerator.DEFAULT_DENSITY, trees_max_count: int = ForestGenerator.DEFAULT_MAX_TREES, **kwargs):
         super().__init__(**kwargs)
         self.tile_path = tile_path
         self.include_buildings = include_buildings
         self.include_helipad = include_helipad
         self.helipad_height = helipad_height
+        self.include_trees = include_trees
+        self.trees_density = trees_density
+        self.trees_max_count = trees_max_count
         self.heightmap_z_resolution = heightmap_z_resolution
         self.gazebo_version = gazebo_version
         self.target_heightmap_size = target_heightmap_size
@@ -199,6 +204,7 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
             self.tile_path,
             include_helipad=self.include_helipad,
             helipad_height=self.helipad_height,
+            include_trees=self.include_trees,
         )
 
     def get_launch_pixelcord(self, south_west_bound, north_east_bound, width, height, launch_location):
@@ -300,6 +306,41 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
 
         return self.size_x,self.size_y,self.size_z,pose_x,pose_y,pose_z
 
+    def generate_trees(self, size_x, size_y, size_z, pose_x, pose_y, pose_z, progress=None):
+        """
+        Plant a procedural forest where the satellite texture shows tree canopy
+        (see utils/forest_generator.py). Writes mesh/trees.dae, mesh/trees_collision.dae,
+        mesh/vegetation_mask.png and trees.csv. A failure here is reported and the
+        world is written without trees.
+        """
+        bound_array = self.boundaries.split(',')
+        origin_lat = (float(bound_array[1]) + float(bound_array[3])) / 2
+        origin_lon = (float(bound_array[0]) + float(bound_array[2])) / 2
+        forest = ForestGenerator(
+            os.path.join(self.tile_path, 'mesh', 'aerial.png'),
+            self.heightmap, self.heightmap_z_resolution,
+            size_x, size_y, size_z, pose_x, pose_y, pose_z,
+            self.tile_path,
+            origin_lat=origin_lat, origin_lon=origin_lon,
+            # Same default as FileWriter.write_world_file's <texture><size>
+            texture_size=max(size_x, size_y),
+            buildings_geojson=os.path.join(self.tile_path, 'buildings.geojson'),
+            vector_tiles_dir=os.path.join(self.tile_path, 'building_tiles'),
+            density=self.trees_density,
+            max_trees=self.trees_max_count,
+            progress=progress,
+        )
+        try:
+            return forest.run()
+        except Exception as e:
+            forest.remove_outputs()
+            message = f"Tree generation failed ({e}); continuing without trees."
+            if progress:
+                progress(message)
+            else:
+                print(message)
+            return None
+
     def generate_gazebo_world(self, progress_cb=None):
         """
             Generate the gazebo world along with world files.
@@ -339,6 +380,10 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
                 }
                 geojson_to_dae = GeoJSONToDAE(street_map, output_dae_file)
                 geojson_to_dae.run(origin_coord, size_z, pose_z, self.heightmap, self.heightmap_z_resolution, polygon_bounds)
+
+            if self.include_trees:
+                progress("Planting trees from the vegetation mask...")
+                self.generate_trees(size_x, size_y, size_z, pose_x, pose_y, pose_z, progress)
 
             progress("Writing world file...")
             self.gen_world(size_x, size_y, size_z, pose_x, pose_y, pose_z)

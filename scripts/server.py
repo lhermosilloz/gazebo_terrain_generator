@@ -13,6 +13,7 @@ from utils.dem_tiles_downloader import download_dem_data
 from utils.building_downloader import download_streetmap_data
 from utils.utils import Utils
 from utils.gazebo_world_generator import GazeboTerrainGenerator
+from utils.forest_generator import ForestGenerator
 from utils.maptile_utils import MapTileUtils
 from utils.height_map_generator import HeightmapGenerator
 from utils.param import GlobalParam
@@ -36,7 +37,30 @@ def compute_auto_heightmap_size(bounds, dem_resolution):
 	return HeightmapGenerator.get_nearest_map_size(natural_max)
 
 
-def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height):
+# --- Trees (forest from vegetation masks): form parsing ---
+TREES_DENSITY_RANGE = (1.0, 1000.0)    # trees per hectare of detected canopy
+TREES_MAX_COUNT_RANGE = (0, 200000)
+
+def parse_trees_settings(postvars):
+	"""Return (trees_enabled, trees_density, trees_max_count) from form fields, clamped to sane ranges."""
+	trees_enabled = postvars.get('treesEnabled', 'true').lower() == 'true'
+	try:
+		trees_density = float(postvars.get('treesDensity', ForestGenerator.DEFAULT_DENSITY))
+	except ValueError:
+		trees_density = ForestGenerator.DEFAULT_DENSITY
+	if trees_density != trees_density:  # NaN
+		trees_density = ForestGenerator.DEFAULT_DENSITY
+	try:
+		trees_max_count = int(float(postvars.get('treesMaxCount', ForestGenerator.DEFAULT_MAX_TREES)))
+	except (ValueError, OverflowError):  # garbage, NaN or infinity
+		trees_max_count = ForestGenerator.DEFAULT_MAX_TREES
+	trees_density = min(max(trees_density, TREES_DENSITY_RANGE[0]), TREES_DENSITY_RANGE[1])
+	trees_max_count = min(max(trees_max_count, TREES_MAX_COUNT_RANGE[0]), TREES_MAX_COUNT_RANGE[1])
+	return trees_enabled, trees_density, trees_max_count
+
+
+def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height,
+		trees_enabled=True, trees_density=ForestGenerator.DEFAULT_DENSITY, trees_max_count=ForestGenerator.DEFAULT_MAX_TREES):
 	global task_status
 
 	def progress(msg):
@@ -68,8 +92,13 @@ def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_b
 		if include_buildings:
 			progress("Downloading building footprint data...")
 			download_streetmap_data(true_boundaries, os.path.join(map_dir, 'building_tiles'), map_dir, api_key=api_key, polygon_vertices=polygon_vertices)
+		elif trees_enabled and trees_max_count > 0:
+			# Same streets-v8 tiles: their buildings, roads and water keep trees off them
+			progress("Downloading road and building outlines for tree placement...")
+			download_streetmap_data(true_boundaries, os.path.join(map_dir, 'building_tiles'), map_dir, api_key=api_key, polygon_vertices=polygon_vertices)
 
-		terrain_generator = GazeboTerrainGenerator(map_dir, include_buildings, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad=include_helipad, helipad_height=helipad_height)
+		terrain_generator = GazeboTerrainGenerator(map_dir, include_buildings, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad=include_helipad, helipad_height=helipad_height,
+			include_trees=trees_enabled and trees_max_count > 0, trees_density=trees_density, trees_max_count=trees_max_count)
 		terrain_generator.generate_gazebo_world(progress_cb=progress)
 
 		for cleanup_dir in ('tiles', 'dem', 'building_tiles'):
@@ -140,6 +169,7 @@ def start_download():
 	gazebo_version = postvars.get('gazeboVersion', 'harmonic')
 	target_heightmap_size_raw = postvars.get('targetHeightmapSize', 'auto')
 	dem_resolution = min(zoom_level, GlobalParam.DEM_RESOLUTION)
+	trees_enabled, trees_density, trees_max_count = parse_trees_settings(postvars)
 
 
 	output_dir = get_map_dir(map_name)
@@ -161,6 +191,9 @@ def start_download():
 		"gazebo_version": gazebo_version,
 		"target_heightmap_size_setting": target_heightmap_size_raw,
 		"timestamp": timestamp,
+		"trees_enabled": trees_enabled,
+		"trees_density": trees_density,
+		"trees_max_count": trees_max_count,
 	}
 	with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
 		json.dump(metadata, f, indent=2)
@@ -191,7 +224,10 @@ def end_download():
 	else:
 		target_heightmap_size = int(target_heightmap_size_raw)
 
-	thread = threading.Thread(target=process_end_download, args=(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height))
+	trees_enabled, trees_density, trees_max_count = parse_trees_settings(postvars)
+
+	thread = threading.Thread(target=process_end_download, args=(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height),
+		kwargs={"trees_enabled": trees_enabled, "trees_density": trees_density, "trees_max_count": trees_max_count})
 	thread.start()
 
 	return jsonify({"code": 200, "message": "Download ended"})
