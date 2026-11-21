@@ -26,6 +26,8 @@
         parallelDownloads: 4,
         gazeboVersion: 'harmonic',
         targetHeightmapSize: 'auto',
+        // Multi-spawn: when helipads are on, one per spawn point (false = spawn 1 only)
+        spawnHelipadAll: true,
         // Ground friction: 'default' keeps Gazebo's default friction (mu = 1)
         frictionPreset: 'default',
         frictionCoefficient: 1
@@ -92,6 +94,7 @@
         const matchedSource = TILE_SOURCES.find(s => s && s.url === config.tileSource);
         document.getElementById('setting-source-display').textContent =
             matchedSource ? matchedSource.label : 'Custom';
+        applySpawnConfigToForm();
     }
 
     const MAPBOX_KEY_STORAGE_KEY = 'gazebo_terrain_generator_mapbox_key';
@@ -253,6 +256,9 @@
             // Setup settings panel
             setupSettingsPanel();
 
+            // Setup additional spawn points (multi-spawn)
+            setupSpawnPoints();
+
             // Setup generate button
             document.getElementById('generate-btn').addEventListener('click', function () {
                 if (validateForGeneration()) {
@@ -373,6 +379,8 @@
         if (centerMarker) {
             centerMarker.setLngLat([lng, lat]);
         }
+        // A new location starts a new selection: drop additional spawn points too
+        clearSpawnPoints();
     }
 
     // Initialize drawing tools
@@ -786,6 +794,11 @@
             return false;
         }
 
+        // Every additional spawn point must be inside the polygon too (multi-spawn)
+        if (!validateSpawnPoints(polygon)) {
+            return false;
+        }
+
         return true;
     }
 
@@ -876,6 +889,8 @@
         const coords = polygon.geometry.coordinates[0];
         const lngLat = centerMarker.getLngLat();
         const launchLocation = [lngLat.lng, lngLat.lat];
+        // Multi-spawn: every spawn point, primary (= launchLocation) first
+        const spawnPointsJson = JSON.stringify(getSpawnPointsPayload());
 
         const tiles = getTiles(zoomLevel);
 
@@ -899,6 +914,8 @@
             startData.append('frictionPreset', config.frictionPreset);
             startData.append('frictionCoefficient', config.frictionCoefficient);
             startData.append('source', source);
+            startData.append('spawnPoints', spawnPointsJson);
+            startData.append('spawnHelipadAll', config.spawnHelipadAll);
             const startResp = await fetch('/start-download', { method: 'POST', body: startData });
             const startResult = await startResp.json();
             if (startResult.code !== 200) throw new Error('start-download failed: ' + startResult.message);
@@ -951,6 +968,8 @@
             endData.append('frictionPreset', config.frictionPreset);
             endData.append('frictionCoefficient', config.frictionCoefficient);
             endData.append('mapboxApiKey', mapboxApiKey);
+            endData.append('spawnPoints', spawnPointsJson);
+            endData.append('spawnHelipadAll', config.spawnHelipadAll);
             const endResp = await fetch('/end-download', { method: 'POST', body: endData });
             const endResult = await endResp.json();
             if (endResult.code !== 200) throw new Error('end-download failed');
@@ -1292,6 +1311,374 @@
             // Note: API key is intentionally not cleared by revert
         });
     }
+
+    // ===== Multi-spawn: additional spawn points (feature: multi-spawn) =====
+    // The red pin (centerMarker) is spawn 1, the world origin, exactly as before.
+    // Additional spawn points are numbered markers (spawn 2..N) that must lie inside
+    // the polygon. Like the polygon and the red pin, they are kept in memory for the
+    // current selection only (not saved across reloads); a polygon redraw keeps them
+    // (they are re-validated), a new location search clears them. The only saved
+    // option is config.spawnHelipadAll.
+
+    const SPAWN_MAX_POINTS = 32;     // primary included; matches MAX_SPAWN_POINTS on the server
+    const SPAWN_HELIPAD_SIZE_M = 5;  // footprint of the Fuel helipad model, for overlap warnings
+    let spawnExtras = [];            // [{ marker, yawDeg }] for spawn 2..N, in order
+    let spawnPrimaryYawDeg = 0;      // yaw of spawn 1 (degrees, counter-clockwise from east)
+    let spawnPlacing = false;        // true while waiting for a map click to place a point
+    let spawnMapButton = null;
+    let spawnPrimaryBadge = null;
+
+    function setupSpawnPoints() {
+        // Map control: "add spawn point" button next to the draw-polygon button
+        const group = map.getContainer().querySelector('.custom-draw-controls');
+        spawnMapButton = document.createElement('button');
+        spawnMapButton.className = 'mapbox-gl-draw_ctrl-draw-btn';
+        spawnMapButton.title = 'Add spawn point (then click inside the polygon)';
+        spawnMapButton.innerHTML = '<i class="fas fa-map-pin"></i>';
+        spawnMapButton.onclick = toggleSpawnPlacement;
+        if (group) group.insertBefore(spawnMapButton, group.children[1] || null);
+
+        document.getElementById('setting-spawn-add-btn').addEventListener('click', toggleSpawnPlacement);
+
+        document.getElementById('setting-spawn-helipad-all').addEventListener('change', function () {
+            config.spawnHelipadAll = this.checked;
+            saveConfig();
+        });
+        // The "helipad at every spawn" option only matters when helipads are on
+        document.getElementById('setting-include-helipad').addEventListener('change', updateSpawnHelipadFieldVisibility);
+
+        map.on('click', onSpawnMapClick);
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && spawnPlacing) stopSpawnPlacement();
+        });
+
+        // Re-validate and re-list after polygon edits (these run after the handlers
+        // that may move the red pin to the polygon centroid) and red pin drags
+        map.on('draw.create', refreshSpawnPoints);
+        map.on('draw.update', refreshSpawnPoints);
+        map.on('draw.delete', refreshSpawnPoints);
+        // draw.create fires while Draw is still in draw_polygon mode, when
+        // getSpawnPolygon() ignores the polygon; re-check once the mode has changed
+        map.on('draw.modechange', refreshSpawnPoints);
+        centerMarker.on('drag', updateSpawnListCoords);
+        centerMarker.on('dragend', refreshSpawnPoints);
+        releasePolygonOnPress(centerMarker.getElement());
+
+        refreshSpawnPoints();
+    }
+
+    // MapboxDraw handles the same map mousedown as a marker drag, so pressing a
+    // marker that sits on the selected polygon would drag the polygon along with
+    // it. Deselect the polygon first (DOM listeners on the marker run before the
+    // event reaches the map).
+    function releasePolygonOnPress(el) {
+        function release() {
+            if (!draw) return;
+            const mode = draw.getMode();
+            if (mode === 'draw_polygon') return;
+            if (mode !== 'simple_select' || draw.getSelectedIds().length > 0) {
+                draw.changeMode('simple_select', { featureIds: [] });
+            }
+        }
+        el.addEventListener('mousedown', release);
+        el.addEventListener('touchstart', release, { passive: true });
+    }
+
+    function applySpawnConfigToForm() {
+        document.getElementById('setting-spawn-helipad-all').checked = config.spawnHelipadAll;
+        updateSpawnHelipadFieldVisibility();
+    }
+
+    function updateSpawnHelipadFieldVisibility() {
+        const helipadOn = document.getElementById('setting-include-helipad').checked;
+        document.getElementById('setting-spawn-helipad-all-field').style.display = helipadOn ? '' : 'none';
+    }
+
+    // The selection polygon, or null while there is none (or it is still being drawn)
+    function getSpawnPolygon() {
+        if (!draw || draw.getMode() === 'draw_polygon') return null;
+        const features = draw.getAll().features;
+        if (features.length === 0 || features[0].geometry.type !== 'Polygon') return null;
+        if (features[0].geometry.coordinates[0].length < 4) return null;
+        return features[0];
+    }
+
+    function isSpawnInside(lngLat, polygon) {
+        return turf.booleanPointInPolygon(turf.point([lngLat.lng, lngLat.lat]), polygon);
+    }
+
+    function toggleSpawnPlacement() {
+        if (spawnPlacing) {
+            stopSpawnPlacement();
+        } else {
+            startSpawnPlacement();
+        }
+    }
+
+    function startSpawnPlacement() {
+        if (draw.getMode() === 'draw_polygon') {
+            showError('Finish drawing the polygon first.');
+            return;
+        }
+        if (!getSpawnPolygon()) {
+            showError('Draw the polygon first, then add spawn points inside it.');
+            return;
+        }
+        if (1 + spawnExtras.length >= SPAWN_MAX_POINTS) {
+            showError(`At most ${SPAWN_MAX_POINTS} spawn points are supported.`);
+            return;
+        }
+        spawnPlacing = true;
+        map.getCanvas().style.cursor = 'crosshair';
+        setSpawnButtonsActive(true);
+        showInfo(`Click inside the polygon to place spawn point ${spawnExtras.length + 2} (Esc to cancel).`);
+    }
+
+    function stopSpawnPlacement() {
+        spawnPlacing = false;
+        if (map) map.getCanvas().style.cursor = '';
+        setSpawnButtonsActive(false);
+    }
+
+    function setSpawnButtonsActive(active) {
+        if (spawnMapButton) spawnMapButton.style.backgroundColor = active ? '#3bb2d0' : '';
+        const addBtn = document.getElementById('setting-spawn-add-btn');
+        addBtn.classList.toggle('active', active);
+        addBtn.innerHTML = active
+            ? '<i class="fas fa-crosshairs"></i> Click inside the polygon (Esc to cancel)'
+            : '<i class="fas fa-plus"></i> Add spawn point';
+    }
+
+    function onSpawnMapClick(e) {
+        if (!spawnPlacing) {
+            // Without a polygon, a map click moves the red pin; keep the list in step
+            updateSpawnListCoords();
+            return;
+        }
+        const polygon = getSpawnPolygon();
+        if (!polygon) {
+            stopSpawnPlacement();
+            return;
+        }
+        if (!isSpawnInside(e.lngLat, polygon)) {
+            showError('Spawn points must be inside the polygon.');
+            return;
+        }
+        addSpawnPoint(e.lngLat, 0);
+        stopSpawnPlacement();
+        warnSpawnSpacing();
+        // The same click selects the polygon in MapboxDraw (or enters vertex editing
+        // if it was already selected); deselect it so the next drag pans the map
+        setTimeout(function () {
+            if (draw.getMode() !== 'draw_polygon') draw.changeMode('simple_select', { featureIds: [] });
+        }, 0);
+    }
+
+    function addSpawnPoint(lngLat, yawDeg) {
+        const el = document.createElement('div');
+        el.className = 'spawn-marker';
+        const marker = new mapboxgl.Marker({ element: el, draggable: true })
+            .setLngLat(lngLat)
+            .addTo(map);
+        const entry = { marker: marker, yawDeg: yawDeg || 0 };
+        spawnExtras.push(entry);
+
+        marker.on('drag', updateSpawnListCoords);
+        marker.on('dragend', function () {
+            refreshSpawnPoints();
+            const polygon = getSpawnPolygon();
+            if (polygon && !isSpawnInside(marker.getLngLat(), polygon)) {
+                showError(`Spawn point ${spawnExtras.indexOf(entry) + 2} is outside the polygon. Move it back inside or right-click it to remove it.`);
+            }
+        });
+        // Right-click removes; stop clicks reaching the map (placement, red pin moves)
+        el.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            removeSpawnPoint(entry);
+        });
+        el.addEventListener('click', function (e) {
+            e.stopPropagation();
+        });
+        releasePolygonOnPress(el);
+
+        refreshSpawnPoints();
+        return entry;
+    }
+
+    function removeSpawnPoint(entry) {
+        entry.marker.remove();
+        spawnExtras = spawnExtras.filter(function (e) { return e !== entry; });
+        refreshSpawnPoints();
+    }
+
+    function clearSpawnPoints() {
+        spawnExtras.forEach(function (e) { e.marker.remove(); });
+        spawnExtras = [];
+        spawnPrimaryYawDeg = 0;
+        if (spawnPlacing) stopSpawnPlacement();
+        refreshSpawnPoints();
+    }
+
+    // Renumber markers, flag the ones outside the polygon, label the red pin, redraw the list
+    function refreshSpawnPoints() {
+        const polygon = getSpawnPolygon();
+        spawnExtras.forEach(function (entry, i) {
+            const num = i + 2;
+            const outside = polygon ? !isSpawnInside(entry.marker.getLngLat(), polygon) : false;
+            const el = entry.marker.getElement();
+            el.textContent = String(num);
+            el.title = `Spawn point ${num}${outside ? ' (outside the polygon)' : ''}: drag to move, right-click to remove`;
+            el.classList.toggle('spawn-marker--outside', outside);
+        });
+        updateSpawnPrimaryBadge();
+        renderSpawnList();
+    }
+
+    // Number the red pin "1" while there are other spawn points
+    function updateSpawnPrimaryBadge() {
+        if (!centerMarker) return;
+        const show = spawnExtras.length > 0;
+        if (show && !spawnPrimaryBadge) {
+            spawnPrimaryBadge = document.createElement('span');
+            spawnPrimaryBadge.className = 'spawn-primary-badge';
+            spawnPrimaryBadge.textContent = '1';
+            centerMarker.getElement().appendChild(spawnPrimaryBadge);
+            centerMarker.getElement().title = 'Spawn point 1 (world origin): drag to move';
+        } else if (!show && spawnPrimaryBadge) {
+            spawnPrimaryBadge.remove();
+            spawnPrimaryBadge = null;
+            centerMarker.getElement().removeAttribute('title');
+        }
+    }
+
+    function getSpawnRows() {
+        const rows = [];
+        if (centerMarker) {
+            rows.push({ num: 1, lngLat: centerMarker.getLngLat(), yawDeg: spawnPrimaryYawDeg, entry: null });
+        }
+        spawnExtras.forEach(function (entry, i) {
+            rows.push({ num: i + 2, lngLat: entry.marker.getLngLat(), yawDeg: entry.yawDeg, entry: entry });
+        });
+        return rows;
+    }
+
+    function formatSpawnLngLat(lngLat) {
+        return `${lngLat.lat.toFixed(5)}, ${lngLat.lng.toFixed(5)}`;
+    }
+
+    // Spawn point list in the settings panel: number, position, yaw, remove
+    function renderSpawnList() {
+        const list = document.getElementById('spawn-points-list');
+        if (!list) return;
+        const polygon = getSpawnPolygon();
+        list.innerHTML = '';
+
+        getSpawnRows().forEach(function (row) {
+            const outside = polygon ? !isSpawnInside(row.lngLat, polygon) : false;
+            const rowEl = document.createElement('div');
+            rowEl.className = 'spawn-row' + (outside ? ' spawn-row--outside' : '');
+
+            const badge = document.createElement('span');
+            badge.className = 'spawn-row-badge' + (row.entry ? '' : ' spawn-row-badge--primary');
+            badge.textContent = String(row.num);
+            badge.title = row.entry ? `Spawn point ${row.num}` : 'Spawn point 1: world origin (red pin)';
+
+            const coords = document.createElement('span');
+            coords.className = 'spawn-row-coords';
+            coords.textContent = formatSpawnLngLat(row.lngLat);
+            coords.title = (outside ? 'Outside the polygon. ' : '') + 'Click to show on the map';
+            coords.addEventListener('click', function () {
+                const target = row.entry ? row.entry.marker.getLngLat() : centerMarker.getLngLat();
+                map.easeTo({ center: target });
+            });
+
+            const yaw = document.createElement('input');
+            yaw.type = 'number';
+            yaw.className = 'spawn-row-yaw';
+            yaw.step = '15';
+            yaw.value = String(row.yawDeg);
+            yaw.title = 'Yaw in degrees, counter-clockwise from east (0 = facing east, 90 = north)';
+            yaw.addEventListener('change', function () {
+                const value = parseFloat(this.value);
+                const yawDeg = isFinite(value) ? value : 0;
+                this.value = String(yawDeg);
+                if (row.entry) {
+                    row.entry.yawDeg = yawDeg;
+                } else {
+                    spawnPrimaryYawDeg = yawDeg;
+                }
+            });
+
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'spawn-row-remove';
+            remove.innerHTML = '<i class="fas fa-trash-alt"></i>';
+            if (row.entry) {
+                remove.title = `Remove spawn point ${row.num}`;
+                remove.addEventListener('click', function () { removeSpawnPoint(row.entry); });
+            } else {
+                // Spawn 1 is the world origin and cannot be removed
+                remove.disabled = true;
+            }
+
+            rowEl.appendChild(badge);
+            rowEl.appendChild(coords);
+            rowEl.appendChild(yaw);
+            rowEl.appendChild(remove);
+            list.appendChild(rowEl);
+        });
+    }
+
+    // Update only the coordinates while a marker is dragged (keeps input focus)
+    function updateSpawnListCoords() {
+        const cells = document.querySelectorAll('#spawn-points-list .spawn-row-coords');
+        getSpawnRows().forEach(function (row, i) {
+            if (cells[i]) cells[i].textContent = formatSpawnLngLat(row.lngLat);
+        });
+    }
+
+    // Called from validateForGeneration(): every additional spawn point must be inside the polygon
+    function validateSpawnPoints(polygon) {
+        refreshSpawnPoints();
+        for (let i = 0; i < spawnExtras.length; i++) {
+            if (!isSpawnInside(spawnExtras[i].marker.getLngLat(), polygon)) {
+                showError(`Spawn point ${i + 2} must be inside the polygon. Drag it inside or right-click it to remove it.`);
+                return false;
+            }
+        }
+        warnSpawnSpacing();
+        return true;
+    }
+
+    // Non-blocking warning when spawn points are close enough for robots or helipads to overlap
+    function warnSpawnSpacing() {
+        const rows = getSpawnRows();
+        const minDist = config.includeHelipad ? SPAWN_HELIPAD_SIZE_M : 1;
+        for (let i = 0; i < rows.length; i++) {
+            for (let j = i + 1; j < rows.length; j++) {
+                const d = turf.distance(
+                    turf.point([rows[i].lngLat.lng, rows[i].lngLat.lat]),
+                    turf.point([rows[j].lngLat.lng, rows[j].lngLat.lat]),
+                    { units: 'kilometers' }
+                ) * 1000;
+                if (d < minDist) {
+                    showInfo(`Spawn points ${rows[i].num} and ${rows[j].num} are only ${d.toFixed(1)} m apart`
+                        + (config.includeHelipad ? `; their ${SPAWN_HELIPAD_SIZE_M} m helipads will overlap.` : '.'));
+                    return;
+                }
+            }
+        }
+    }
+
+    // Form payload: all spawn points, primary first. The server takes the primary's
+    // position from launchLocation and validates the rest against the polygon.
+    function getSpawnPointsPayload() {
+        return getSpawnRows().map(function (row) {
+            return { lng: row.lngLat.lng, lat: row.lngLat.lat, yawDeg: row.yawDeg };
+        });
+    }
+    // ===== End multi-spawn =====
 
     // --- Ground friction (roadmap: "Friction components to the ground") ---
     // Presets live in index.html as <option data-mu="...">. 'default' sends no

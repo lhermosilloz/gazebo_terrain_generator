@@ -17,6 +17,7 @@ from utils.gazebo_world_generator import GazeboTerrainGenerator
 from utils.maptile_utils import MapTileUtils
 from utils.height_map_generator import HeightmapGenerator
 from utils.param import GlobalParam
+from utils.spawn_points import parse_spawn_points
 
 app = Flask(__name__)
 lock = threading.Lock()
@@ -57,7 +58,7 @@ def parse_friction(postvars):
 	return preset, mu
 
 
-def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height, friction_coefficient=None):
+def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height, friction_coefficient=None, spawn_points=None, spawn_helipad_all=True):
 	global task_status
 
 	def progress(msg):
@@ -90,7 +91,8 @@ def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_b
 			progress("Downloading building footprint data...")
 			download_streetmap_data(true_boundaries, os.path.join(map_dir, 'building_tiles'), map_dir, api_key=api_key, polygon_vertices=polygon_vertices)
 
-		terrain_generator = GazeboTerrainGenerator(map_dir, include_buildings, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad=include_helipad, helipad_height=helipad_height, friction_coefficient=friction_coefficient)
+		terrain_generator = GazeboTerrainGenerator(map_dir, include_buildings, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad=include_helipad, helipad_height=helipad_height,
+			friction_coefficient=friction_coefficient, spawn_points=spawn_points, spawn_helipad_all=spawn_helipad_all)
 		terrain_generator.generate_gazebo_world(progress_cb=progress)
 
 		for cleanup_dir in ('tiles', 'dem', 'building_tiles'):
@@ -166,6 +168,12 @@ def start_download():
 	except ValueError as e:
 		return jsonify({"code": 400, "message": str(e)})
 
+	# Multi-spawn: validate before touching the output directory
+	try:
+		spawn_points = parse_spawn_points(postvars.get('spawnPoints'), polygon_vertices, launch_location)
+	except ValueError as e:
+		return jsonify({"code": 400, "message": str(e)}), 400
+	spawn_helipad_all = postvars.get('spawnHelipadAll', 'true').lower() == 'true'
 
 	output_dir = get_map_dir(map_name)
 	if os.path.exists(output_dir):
@@ -188,6 +196,8 @@ def start_download():
 		"friction_preset": friction_preset,
 		"friction_coefficient": friction_coefficient,
 		"timestamp": timestamp,
+		"spawn_points": spawn_points,
+		"spawn_helipad_all": spawn_helipad_all,
 	}
 	with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
 		json.dump(metadata, f, indent=2)
@@ -222,7 +232,20 @@ def end_download():
 	else:
 		target_heightmap_size = int(target_heightmap_size_raw)
 
-	thread = threading.Thread(target=process_end_download, args=(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height, friction_coefficient))
+	# Multi-spawn (the generator takes the primary's position from metadata.json)
+	try:
+		spawn_points = parse_spawn_points(postvars.get('spawnPoints'), polygon_vertices)
+	except ValueError as e:
+		return jsonify({"code": 400, "message": str(e)}), 400
+	spawn_helipad_all = postvars.get('spawnHelipadAll', 'true').lower() == 'true'
+
+	# Roadmap feature settings go by keyword, so their order in the signature does not matter
+	thread = threading.Thread(target=process_end_download, args=(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height),
+		kwargs={
+			"friction_coefficient": friction_coefficient,
+			"spawn_points": spawn_points,
+			"spawn_helipad_all": spawn_helipad_all,
+		})
 	thread.start()
 
 	return jsonify({"code": 200, "message": "Download ended"})

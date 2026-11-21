@@ -1,6 +1,7 @@
 import os
 import cv2
 import json
+import math
 import numpy as np
 from utils.file_writer import FileWriter
 from utils.param import GlobalParam
@@ -8,6 +9,7 @@ from utils.maptile_utils import MapTileUtils
 from utils.buildings_generator import GeoJSONToDAE
 from utils.height_map_generator import HeightmapGenerator
 from utils.utils import ConcatImage
+from utils.spawn_points import spawn_feature_active, frame_names
 from geopy.distance import geodesic
 from geopy.point import Point
 
@@ -116,12 +118,18 @@ class OrthoGenerator(ConcatImage):
 
 
 class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
-    def __init__(self, tile_path: str, include_buildings: bool, heightmap_z_resolution: int, gazebo_version: str, target_heightmap_size: int, include_helipad: bool = False, helipad_height: float = 5.0, friction_coefficient: float = None, **kwargs):
+    def __init__(self, tile_path: str, include_buildings: bool, heightmap_z_resolution: int, gazebo_version: str, target_heightmap_size: int, include_helipad: bool = False, helipad_height: float = 5.0,
+                 friction_coefficient: float = None, spawn_points: list = None, spawn_helipad_all: bool = True, **kwargs):
         super().__init__(**kwargs)
         self.tile_path = tile_path
         self.include_buildings = include_buildings
         self.include_helipad = include_helipad
         self.helipad_height = helipad_height
+        # Multi-spawn: [{"name", "lng", "lat", "yaw_deg"}], primary (= launch location) first.
+        # None or a single point at yaw 0 keeps the single-spawn output unchanged.
+        self.spawn_points = spawn_points
+        # When helipads are on: True = one helipad per spawn point, False = primary only
+        self.spawn_helipad_all = spawn_helipad_all
         self.heightmap_z_resolution = heightmap_z_resolution
         self.gazebo_version = gazebo_version
         self.target_heightmap_size = target_heightmap_size
@@ -189,6 +197,7 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
         template_file = 'gazebo_fortress_world_template.sdf' if self.gazebo_version == 'fortress' else 'gazebo_world_template.sdf'
         template = FileWriter.read_template(os.path.join(GlobalParam.TEMPLATE_DIR_PATH, template_file))
         launch_cord = self.get_launch_location()
+        spawn_poses = self.get_spawn_poses(size_x, size_y, size_z, pose_x, pose_y, pose_z, launch_cord)
         FileWriter.write_world_file(
             template,
             self.model_name,
@@ -202,7 +211,112 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
             include_helipad=self.include_helipad,
             helipad_height=self.helipad_height,
             friction_coefficient=self.get_ground_friction(),
+            spawn_poses=spawn_poses,
         )
+
+    def get_spawn_poses(self, size_x, size_y, size_z, pose_x, pose_y, pose_z, launch=None):
+        """
+        Compute the world pose of every spawn point (multi-spawn feature).
+
+        The primary spawn point is the launch location, i.e. the world origin: the
+        terrain was offset by (pose_x, pose_y, pose_z) so that it sits at (0, 0, 0).
+        Additional points use the same linear lat/lon -> terrain mapping as the
+        heightmap and aerial texture (terrain centre at pose_x, pose_y; size_x by
+        size_y metres), so each one lands on the spot picked on the map. Ground
+        height is interpolated from the generated heightmap (same pixel convention
+        as the launch point lookup), plus the terrain offset pose_z.
+
+        Args:
+            launch (dict|None): get_launch_location() result, if already computed.
+
+        Returns:
+            list[dict] | None: one dict per spawn point (frame name, lat/lon, x/y/z,
+            yaw, helipad name or None), or None when the feature is inactive.
+        """
+        if not spawn_feature_active(self.spawn_points):
+            return None
+
+        bound_array = self.boundaries.split(',')
+        lat_min = float(bound_array[1])
+        lat_max = float(bound_array[3])
+        lon_min = float(bound_array[0])
+        lon_max = float(bound_array[2])
+        width, height = self.heightmap.size
+        dem_path = os.path.join(self.tile_path, 'dem')
+        launch = launch or self.get_launch_location()
+        frames = frame_names(self.model_name, len(self.spawn_points))
+        heights = np.asarray(self.heightmap, dtype=np.float64)
+
+        def ground_height(lat, lon):
+            # Bilinear version of the nearest-pixel lookup used for the launch point
+            # (get_launch_pixelcord: pixel = int(u * width), i.e. pixel centres at
+            # (i + 0.5) / width). Measured against Gazebo Harmonic's heightmap collision
+            # with rail probes, nearest-pixel was off by up to slope * half a cell (1.4 m
+            # on a 257 px map with 12.6 m cells); bilinear stayed within ~0.3 m.
+            fx = min(max((lon - lon_min) / (lon_max - lon_min) * width - 0.5, 0.0), width - 1.0)
+            fy = min(max((lat_max - lat) / (lat_max - lat_min) * height - 0.5, 0.0), height - 1.0)
+            x0, y0 = min(int(fx), width - 2), min(int(fy), height - 2)
+            tx, ty = fx - x0, fy - y0
+            value = (heights[y0, x0] * (1 - tx) * (1 - ty) + heights[y0, x0 + 1] * tx * (1 - ty)
+                     + heights[y0 + 1, x0] * (1 - tx) * ty + heights[y0 + 1, x0 + 1] * tx * ty)
+            return float(value * size_z / self.heightmap_z_resolution + pose_z)
+
+        # Gazebo Harmonic's heightmap collision (DART) stops about half a heightmap
+        # cell short of the terrain edges (measured: nothing under a probe 6 m inside
+        # the edge of a 257 px map with 12.6 m cells), so a robot spawned there falls
+        # out of the world. Keep additional spawn points one cell inside the edges.
+        edge_u = min(1.0 / (width - 1), 0.5)
+        edge_v = min(1.0 / (height - 1), 0.5)
+
+        poses = []
+        for i, spawn in enumerate(self.spawn_points):
+            primary = i == 0
+            if primary:
+                lat, lon = launch["latitude"], launch["longitude"]
+                x = y = ground_z = 0.0
+                ground_amsl = launch["altitude"]
+            else:
+                lat, lon = spawn["lat"], spawn["lng"]
+                # float(): size_z/pose_z are numpy floats (from the heightmap)
+                u = (lon - lon_min) / (lon_max - lon_min)
+                v = (lat - lat_min) / (lat_max - lat_min)
+                u_in = min(max(u, edge_u), 1 - edge_u)
+                v_in = min(max(v, edge_v), 1 - edge_v)
+                if (u_in, v_in) != (u, v):
+                    moved = math.hypot((u_in - u) * size_x, (v_in - v) * size_y)
+                    print(f"Spawn point {i + 1} is within one heightmap cell of the terrain edge, "
+                          f"too close for Gazebo's heightmap collision; moved it {moved:.1f} m inward")
+                    u, v = u_in, v_in
+                    lon = lon_min + u * (lon_max - lon_min)
+                    lat = lat_min + v * (lat_max - lat_min)
+                x = float(pose_x + (u - 0.5) * size_x)
+                y = float(pose_y + (v - 0.5) * size_y)
+                ground_z = ground_height(lat, lon)
+                ground_amsl = HeightmapGenerator.get_amsl(lat, lon, dem_path, self.dem_resolution)
+
+            yaw_deg = float(spawn.get("yaw_deg", 0.0))
+            has_helipad = self.include_helipad and (primary or self.spawn_helipad_all)
+            if has_helipad:
+                # The primary keeps the original helipad name
+                helipad = f"{self.model_name}_helipad" if primary else f"{self.model_name}_helipad_{i + 1}"
+            else:
+                helipad = None
+
+            poses.append({
+                "frame": frames[i],
+                "primary": primary,
+                "lat": lat,
+                "lon": lon,
+                "x": x,
+                "y": y,
+                "ground_z": ground_z,
+                "z": ground_z + (self.helipad_height if has_helipad else 0.0),
+                "ground_amsl": ground_amsl,
+                "yaw_deg": yaw_deg,
+                "yaw": math.radians(yaw_deg),
+                "helipad": helipad,
+            })
+        return poses
 
     def get_launch_pixelcord(self, south_west_bound, north_east_bound, width, height, launch_location):
         """
