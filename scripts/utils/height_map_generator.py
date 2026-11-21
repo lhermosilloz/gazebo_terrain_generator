@@ -1,11 +1,14 @@
 import cv2
 import os
+import json
 import numpy as np
 import math
 from PIL import Image
+from geopy.distance import geodesic
 from utils.maptile_utils import MapTileUtils
 from utils.utils import ConcatImage
 from utils.param import GlobalParam
+from utils.road_smoother import smooth_heightmap_roads, DEFAULT_SMOOTHING_LENGTH_M, DEFAULT_SHOULDER_WIDTH_M
 
 class HeightmapGenerator(ConcatImage):
     def __init__(self,**kwargs):
@@ -14,6 +17,11 @@ class HeightmapGenerator(ConcatImage):
         self.heightmap_z_resolution = 65535  # max pixel value; 65535 for 16-bit, 255 for 8-bit
         self.max_height = self.min_height = 0
         self.size_x=self.size_y=self.size_z=0
+        # Road smoothing (roadmap: smooth roads); enabled by GazeboTerrainGenerator
+        self.roads_smooth = False
+        self.roads_smoothing_length = DEFAULT_SMOOTHING_LENGTH_M
+        self.roads_shoulder_width = DEFAULT_SHOULDER_WIDTH_M
+        self.road_smoothing_stats = None
 
 
     def get_dem_px_bounds(self, true_boundaries, dem_snap_boundaries, height, width):
@@ -133,6 +141,10 @@ class HeightmapGenerator(ConcatImage):
         smooth_kernel = max(3, (size // 1000) * 2 + 1)  # ~31px for 4097, ~15px for 2049, always odd
         resized_map = cv2.GaussianBlur(resized_map, (smooth_kernel, smooth_kernel), sigmaX=0)
 
+        # Flatten and smooth road corridors before anything is derived from the heightmap
+        # (PNG, in-memory lookups for spawn/buildings, normal map).
+        resized_map = self.apply_road_smoothing(resized_map, polygon_bounds, tile_path)
+
         mesh_dir = os.path.join(tile_path, 'mesh')
 
         # cv2 writes uint8 as 8-bit PNG and uint16 as 16-bit PNG automatically
@@ -153,6 +165,44 @@ class HeightmapGenerator(ConcatImage):
         # regardless of pixel range (8-bit values are 256× smaller than 16-bit ones)
         normal_map = HeightmapGenerator.generate_normal_map(resized_map, strength=0.0002 * (terrain_range / 100.0) * (65535 / self.heightmap_z_resolution))
         cv2.imwrite(os.path.join(mesh_dir, 'normal_map.png'), normal_map)
+
+    def apply_road_smoothing(self, heightmap: np.ndarray, polygon_bounds: dict, tile_path: str) -> np.ndarray:
+        """
+        Flatten road corridors across and smooth them along their length (see road_smoother).
+
+        Reads {tile_path}/roads.geojson. Returns the heightmap unchanged when road smoothing
+        is off or no road data was downloaded; otherwise a smoothed copy of the same dtype.
+        """
+        self.road_smoothing_stats = None
+        if not self.roads_smooth:
+            return heightmap
+        roads_path = os.path.join(tile_path, 'roads.geojson')
+        if not os.path.isfile(roads_path):
+            print("Road smoothing skipped: no road data")
+            return heightmap
+        with open(roads_path) as f:
+            roads = json.load(f)
+        # Same extent definitions as get_world_dimensions()
+        size_x = geodesic(polygon_bounds["southwest"], polygon_bounds["southeast"]).m
+        size_y = geodesic(polygon_bounds["southeast"], polygon_bounds["northeast"]).m
+        smoothed, stats = smooth_heightmap_roads(
+            heightmap, roads, polygon_bounds, size_x, size_y,
+            smoothing_length=self.roads_smoothing_length,
+            shoulder_width=self.roads_shoulder_width,
+        )
+        self.road_smoothing_stats = stats
+        print(f"Road smoothing: {stats}")
+        return smoothed
+
+    def road_smoothing_summary(self) -> str:
+        """One-line progress message describing the last apply_road_smoothing() call."""
+        stats = self.road_smoothing_stats
+        if not stats:
+            return "Road smoothing skipped: no road data for this area."
+        if not stats['segments']:
+            return "Road smoothing: no drivable roads found for this area."
+        return (f"Smoothed {stats['segments']} road segments ({stats['length_km']:.1f} km), "
+                f"{stats['fraction_changed'] * 100:.1f}% of the heightmap adjusted.")
 
     @staticmethod
     def generate_normal_map(heightmap_u16: np.ndarray, strength: float) -> np.ndarray:

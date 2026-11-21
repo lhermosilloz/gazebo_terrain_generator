@@ -11,6 +11,8 @@ from pathlib import Path
 import mimetypes
 from utils.dem_tiles_downloader import download_dem_data
 from utils.building_downloader import download_streetmap_data
+from utils.road_downloader import download_road_data
+from utils.road_smoother import DEFAULT_SMOOTHING_LENGTH_M, DEFAULT_SHOULDER_WIDTH_M
 from utils.utils import Utils
 from utils.gazebo_world_generator import GazeboTerrainGenerator
 from utils.maptile_utils import MapTileUtils
@@ -36,7 +38,22 @@ def compute_auto_heightmap_size(bounds, dem_resolution):
 	return HeightmapGenerator.get_nearest_map_size(natural_max)
 
 
-def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height):
+def parse_roads_settings(postvars):
+	"""Road smoothing form fields (roadmap: smooth roads). On by default; numbers are clamped."""
+	def clamped_float(name, default, lo, hi):
+		try:
+			value = float(postvars.get(name, default))
+		except (TypeError, ValueError):
+			return default
+		return min(max(value, lo), hi) if value == value else default  # NaN -> default
+
+	roads_smooth = str(postvars.get('roadsSmooth', 'true')).lower() == 'true'
+	roads_smoothing_length = clamped_float('roadsSmoothingLength', DEFAULT_SMOOTHING_LENGTH_M, 10.0, 1000.0)
+	roads_shoulder_width = clamped_float('roadsShoulderWidth', DEFAULT_SHOULDER_WIDTH_M, 0.0, 100.0)
+	return roads_smooth, roads_smoothing_length, roads_shoulder_width
+
+
+def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height, roads_smooth=True, roads_smoothing_length=DEFAULT_SMOOTHING_LENGTH_M, roads_shoulder_width=DEFAULT_SHOULDER_WIDTH_M):
 	global task_status
 
 	def progress(msg):
@@ -69,14 +86,25 @@ def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_b
 			progress("Downloading building footprint data...")
 			download_streetmap_data(true_boundaries, os.path.join(map_dir, 'building_tiles'), map_dir, api_key=api_key, polygon_vertices=polygon_vertices)
 
-		terrain_generator = GazeboTerrainGenerator(map_dir, include_buildings, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad=include_helipad, helipad_height=helipad_height)
+		if roads_smooth:
+			# Same streets-v8 tiles as the buildings; the shared cache avoids a second download.
+			progress("Downloading road data...")
+			try:
+				road_info = download_road_data(true_boundaries, os.path.join(map_dir, 'building_tiles'), map_dir, api_key=api_key)
+				if road_info["missing"]:
+					progress(f"Warning: {road_info['missing']} of {road_info['tiles']} road tiles could not be downloaded; roads there are not smoothed.")
+			except Exception as e:
+				progress(f"Road data unavailable, roads will not be smoothed: {e}")
+
+		terrain_generator = GazeboTerrainGenerator(map_dir, include_buildings, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad=include_helipad, helipad_height=helipad_height,
+			roads_smooth=roads_smooth, roads_smoothing_length=roads_smoothing_length, roads_shoulder_width=roads_shoulder_width)
 		terrain_generator.generate_gazebo_world(progress_cb=progress)
 
 		for cleanup_dir in ('tiles', 'dem', 'building_tiles'):
 			cleanup_path = os.path.join(map_dir, cleanup_dir)
 			if os.path.isdir(cleanup_path):
 				shutil.rmtree(cleanup_path)
-		for cleanup_file in ('buildings.geojson', 'metadata.json'):
+		for cleanup_file in ('buildings.geojson', 'roads.geojson', 'metadata.json'):
 			cleanup_path = os.path.join(map_dir, cleanup_file)
 			if os.path.isfile(cleanup_path):
 				os.remove(cleanup_path)
@@ -140,6 +168,7 @@ def start_download():
 	gazebo_version = postvars.get('gazeboVersion', 'harmonic')
 	target_heightmap_size_raw = postvars.get('targetHeightmapSize', 'auto')
 	dem_resolution = min(zoom_level, GlobalParam.DEM_RESOLUTION)
+	roads_smooth, roads_smoothing_length, roads_shoulder_width = parse_roads_settings(postvars)
 
 
 	output_dir = get_map_dir(map_name)
@@ -161,6 +190,9 @@ def start_download():
 		"gazebo_version": gazebo_version,
 		"target_heightmap_size_setting": target_heightmap_size_raw,
 		"timestamp": timestamp,
+		"roads_smooth": roads_smooth,
+		"roads_smoothing_length": roads_smoothing_length,
+		"roads_shoulder_width": roads_shoulder_width,
 	}
 	with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
 		json.dump(metadata, f, indent=2)
@@ -191,7 +223,10 @@ def end_download():
 	else:
 		target_heightmap_size = int(target_heightmap_size_raw)
 
-	thread = threading.Thread(target=process_end_download, args=(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height))
+	roads_smooth, roads_smoothing_length, roads_shoulder_width = parse_roads_settings(postvars)
+
+	thread = threading.Thread(target=process_end_download, args=(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height),
+		kwargs={"roads_smooth": roads_smooth, "roads_smoothing_length": roads_smoothing_length, "roads_shoulder_width": roads_shoulder_width})
 	thread.start()
 
 	return jsonify({"code": 200, "message": "Download ended"})

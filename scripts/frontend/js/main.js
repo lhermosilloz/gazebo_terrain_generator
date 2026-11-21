@@ -25,7 +25,10 @@
         tileSource: 'https://mt0.google.com/vt?lyrs=s&x={x}&s=&y={y}&z={z}',
         parallelDownloads: 4,
         gazeboVersion: 'harmonic',
-        targetHeightmapSize: 'auto'
+        targetHeightmapSize: 'auto',
+        roadsSmooth: true,
+        roadsSmoothingLength: 80,
+        roadsShoulderWidth: 4
     };
 
     const config = loadConfig();
@@ -83,6 +86,7 @@
         document.getElementById('setting-parallel-downloads').value = config.parallelDownloads;
         document.getElementById('setting-gazebo-version').value = config.gazeboVersion;
         document.getElementById('setting-target-heightmap-size').value = config.targetHeightmapSize;
+        applyRoadsConfigToForm();
         updateMapboxKeyStatus(loadMapboxKey());
 
         const matchedSource = TILE_SOURCES.find(s => s && s.url === config.tileSource);
@@ -893,6 +897,7 @@
             startData.append('helipadHeight', config.helipadHeight);
             startData.append('gazeboVersion', config.gazeboVersion);
             startData.append('source', source);
+            appendRoadsSettings(startData);
             const startResp = await fetch('/start-download', { method: 'POST', body: startData });
             const startResult = await startResp.json();
             if (startResult.code !== 200) throw new Error('start-download failed: ' + startResult.message);
@@ -943,6 +948,7 @@
             endData.append('gazeboVersion', config.gazeboVersion);
             endData.append('targetHeightmapSize', config.targetHeightmapSize);
             endData.append('mapboxApiKey', mapboxApiKey);
+            appendRoadsSettings(endData);
             const endResp = await fetch('/end-download', { method: 'POST', body: endData });
             const endResult = await endResp.json();
             if (endResult.code !== 200) throw new Error('end-download failed');
@@ -1266,6 +1272,8 @@
             renderEstimateInfo(lastEstimateResult);
         });
 
+        setupRoadsSettings();
+
         document.getElementById('setting-mapbox-key-btn').addEventListener('click', function () {
             openApikeyModal(function (key) {
                 mapboxApiKey = key;
@@ -1282,6 +1290,48 @@
             // Note: API key is intentionally not cleared by revert
         });
     }
+
+    // --- Smooth roads (roadmap feature) ---------------------------------------
+    // The server flattens road corridors in the heightmap and smooths them along
+    // their length. Settings: roadsSmooth (on/off), roadsSmoothingLength and
+    // roadsShoulderWidth (metres), posted to /start-download and /end-download.
+
+    function applyRoadsConfigToForm() {
+        document.getElementById('setting-roads-smooth').checked = config.roadsSmooth;
+        document.getElementById('setting-roads-smoothing-length').value = config.roadsSmoothingLength;
+        document.getElementById('setting-roads-shoulder-width').value = config.roadsShoulderWidth;
+        document.getElementById('setting-roads-options').style.display = config.roadsSmooth ? '' : 'none';
+    }
+
+    function setupRoadsSettings() {
+        document.getElementById('setting-roads-smooth').addEventListener('change', function () {
+            config.roadsSmooth = this.checked;
+            document.getElementById('setting-roads-options').style.display = this.checked ? '' : 'none';
+            saveConfig();
+        });
+
+        document.getElementById('setting-roads-smoothing-length').addEventListener('change', function () {
+            const value = parseFloat(this.value);
+            config.roadsSmoothingLength = value >= 10 ? Math.min(value, 1000) : DEFAULT_CONFIG.roadsSmoothingLength;
+            this.value = config.roadsSmoothingLength;
+            saveConfig();
+        });
+
+        document.getElementById('setting-roads-shoulder-width').addEventListener('change', function () {
+            const value = parseFloat(this.value);
+            config.roadsShoulderWidth = value >= 0 ? Math.min(value, 100) : DEFAULT_CONFIG.roadsShoulderWidth;
+            this.value = config.roadsShoulderWidth;
+            saveConfig();
+        });
+    }
+
+    function appendRoadsSettings(formData) {
+        formData.append('roadsSmooth', config.roadsSmooth);
+        formData.append('roadsSmoothingLength', config.roadsSmoothingLength);
+        formData.append('roadsShoulderWidth', config.roadsShoulderWidth);
+    }
+
+    // --- end smooth roads -------------------------------------------------------
 
     // --- Tile utilities ---
 
