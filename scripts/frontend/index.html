@@ -72,7 +72,7 @@
                         </div>
 
                         <div class="settings-field settings-field--row">
-                            <label for="setting-include-helipad">Include Helipad <i class="fas fa-circle-info tooltip-icon" data-tooltip="Spawns a helipad marker at the world origin (launch location)."></i></label>
+                            <label for="setting-include-helipad">Include Helipad <i class="fas fa-circle-info tooltip-icon" data-tooltip="Spawns a helipad marker at the world origin (launch location) and, unless turned off under Spawn Points, at every additional spawn point."></i></label>
                             <label class="toggle-switch">
                                 <input type="checkbox" id="setting-include-helipad">
                                 <span class="toggle-slider"></span>
@@ -114,6 +114,24 @@
                             <select id="setting-target-heightmap-size">
                                 <option value="auto">Auto (nearest to DEM resolution)</option>
                             </select>
+                        </div>
+
+                        <!-- Feature: multiple spawn points (multi-spawn) -->
+                        <div id="spawn-settings" class="spawn-settings">
+                            <div class="settings-field">
+                                <label>Spawn Points <i class="fas fa-circle-info tooltip-icon" data-tooltip="Spawn 1 (red pin) is the world origin. Add more with the pin button on the map or below, then click inside the polygon. Drag a numbered marker to move it, right-click it to remove it. Each spawn point becomes an SDF frame (spawn_N) in the world and an entry in spawn_points.json. Yaw: degrees, counter-clockwise from east."></i></label>
+                                <div id="spawn-points-list" class="spawn-points-list"></div>
+                                <button type="button" id="setting-spawn-add-btn" class="spawn-add-btn">
+                                    <i class="fas fa-plus"></i> Add spawn point
+                                </button>
+                            </div>
+                            <div class="settings-field settings-field--row" id="setting-spawn-helipad-all-field" style="display:none;">
+                                <label for="setting-spawn-helipad-all">Helipad at Every Spawn <i class="fas fa-circle-info tooltip-icon" data-tooltip="On: one helipad per spawn point. Off: only spawn point 1 gets a helipad; the others spawn on the ground."></i></label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="setting-spawn-helipad-all" checked>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
                         </div>
 
                         <div class="settings-field settings-field--row">

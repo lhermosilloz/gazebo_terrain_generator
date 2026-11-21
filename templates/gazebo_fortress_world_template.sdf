@@ -253,6 +253,7 @@
             <longitude_deg>$ORIGIN_LONG$</longitude_deg>
             <elevation>$ORIGIN_ELEVATION$</elevation>
         </spherical_coordinates>
+$SPAWN_FRAMES$
 
         <!-- OGRE2 ignores both model and link <pose> for heightmap visuals;
              visual position is controlled by <heightmap><pos> (world frame).

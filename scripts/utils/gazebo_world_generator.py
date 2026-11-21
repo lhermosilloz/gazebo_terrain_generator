@@ -1,6 +1,7 @@
 import os
 import cv2
 import json
+import math
 import numpy as np
 from utils.file_writer import FileWriter
 from utils.param import GlobalParam
@@ -8,6 +9,7 @@ from utils.maptile_utils import MapTileUtils
 from utils.buildings_generator import GeoJSONToDAE
 from utils.height_map_generator import HeightmapGenerator
 from utils.utils import ConcatImage
+from utils.spawn_points import spawn_feature_active, frame_names
 from geopy.distance import geodesic
 from geopy.point import Point
 
@@ -116,12 +118,17 @@ class OrthoGenerator(ConcatImage):
 
 
 class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
-    def __init__(self, tile_path: str, include_buildings: bool, heightmap_z_resolution: int, gazebo_version: str, target_heightmap_size: int, include_helipad: bool = False, helipad_height: float = 5.0, **kwargs):
+    def __init__(self, tile_path: str, include_buildings: bool, heightmap_z_resolution: int, gazebo_version: str, target_heightmap_size: int, include_helipad: bool = False, helipad_height: float = 5.0, spawn_points: list = None, spawn_helipad_all: bool = True, **kwargs):
         super().__init__(**kwargs)
         self.tile_path = tile_path
         self.include_buildings = include_buildings
         self.include_helipad = include_helipad
         self.helipad_height = helipad_height
+        # Multi-spawn: [{"name", "lng", "lat", "yaw_deg"}], primary (= launch location) first.
+        # None or a single point at yaw 0 keeps the single-spawn output unchanged.
+        self.spawn_points = spawn_points
+        # When helipads are on: True = one helipad per spawn point, False = primary only
+        self.spawn_helipad_all = spawn_helipad_all
         self.heightmap_z_resolution = heightmap_z_resolution
         self.gazebo_version = gazebo_version
         self.target_heightmap_size = target_heightmap_size
@@ -187,6 +194,7 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
         template_file = 'gazebo_fortress_world_template.sdf' if self.gazebo_version == 'fortress' else 'gazebo_world_template.sdf'
         template = FileWriter.read_template(os.path.join(GlobalParam.TEMPLATE_DIR_PATH, template_file))
         launch_cord = self.get_launch_location()
+        spawn_poses = self.get_spawn_poses(size_x, size_y, size_z, pose_x, pose_y, pose_z, launch_cord)
         FileWriter.write_world_file(
             template,
             self.model_name,
@@ -199,7 +207,84 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
             self.tile_path,
             include_helipad=self.include_helipad,
             helipad_height=self.helipad_height,
+            spawn_poses=spawn_poses,
         )
+
+    def get_spawn_poses(self, size_x, size_y, size_z, pose_x, pose_y, pose_z, launch=None):
+        """
+        Compute the world pose of every spawn point (multi-spawn feature).
+
+        The primary spawn point is the launch location, i.e. the world origin: the
+        terrain was offset by (pose_x, pose_y, pose_z) so that it sits at (0, 0, 0).
+        Additional points use the same linear lat/lon -> terrain mapping as the
+        heightmap and aerial texture (terrain centre at pose_x, pose_y; size_x by
+        size_y metres), so each one lands on the spot picked on the map. Ground
+        height comes from the generated heightmap with the same pixel lookup used
+        for the launch point and the buildings, plus the terrain offset pose_z.
+
+        Args:
+            launch (dict|None): get_launch_location() result, if already computed.
+
+        Returns:
+            list[dict] | None: one dict per spawn point (frame name, lat/lon, x/y/z,
+            yaw, helipad name or None), or None when the feature is inactive.
+        """
+        if not spawn_feature_active(self.spawn_points):
+            return None
+
+        bound_array = self.boundaries.split(',')
+        lat_min = float(bound_array[1])
+        lat_max = float(bound_array[3])
+        lon_min = float(bound_array[0])
+        lon_max = float(bound_array[2])
+        sw = (lat_min, lon_min)
+        ne = (lat_max, lon_max)
+        width, height = self.heightmap.size
+        dem_path = os.path.join(self.tile_path, 'dem')
+        launch = launch or self.get_launch_location()
+        frames = frame_names(self.model_name, len(self.spawn_points))
+
+        poses = []
+        for i, spawn in enumerate(self.spawn_points):
+            primary = i == 0
+            if primary:
+                lat, lon = launch["latitude"], launch["longitude"]
+                x = y = ground_z = 0.0
+                ground_amsl = launch["altitude"]
+            else:
+                lat, lon = spawn["lat"], spawn["lng"]
+                # float(): size_z/pose_z are numpy floats (from the heightmap)
+                x = float(pose_x + ((lon - lon_min) / (lon_max - lon_min) - 0.5) * size_x)
+                y = float(pose_y + ((lat - lat_min) / (lat_max - lat_min) - 0.5) * size_y)
+                px, py = self.get_launch_pixelcord(sw, ne, width, height, {"latitude": lat, "longitude": lon})
+                px = max(0, min(px, width - 1))
+                py = max(0, min(py, height - 1))
+                ground_z = float(self.heightmap.getpixel((px, py)) * size_z / self.heightmap_z_resolution + pose_z)
+                ground_amsl = HeightmapGenerator.get_amsl(lat, lon, dem_path, self.dem_resolution)
+
+            yaw_deg = float(spawn.get("yaw_deg", 0.0))
+            has_helipad = self.include_helipad and (primary or self.spawn_helipad_all)
+            if has_helipad:
+                # The primary keeps the original helipad name
+                helipad = f"{self.model_name}_helipad" if primary else f"{self.model_name}_helipad_{i + 1}"
+            else:
+                helipad = None
+
+            poses.append({
+                "frame": frames[i],
+                "primary": primary,
+                "lat": lat,
+                "lon": lon,
+                "x": x,
+                "y": y,
+                "ground_z": ground_z,
+                "z": ground_z + (self.helipad_height if has_helipad else 0.0),
+                "ground_amsl": ground_amsl,
+                "yaw_deg": yaw_deg,
+                "yaw": math.radians(yaw_deg),
+                "helipad": helipad,
+            })
+        return poses
 
     def get_launch_pixelcord(self, south_west_bound, north_east_bound, width, height, launch_location):
         """

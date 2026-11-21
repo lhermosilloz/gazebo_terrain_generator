@@ -1,5 +1,6 @@
 import os
 from utils.param import GlobalParam
+from utils.spawn_points import helipad_include, frames_block, write_spawn_points_json
 
 
 class FileWriter:
@@ -14,7 +15,8 @@ class FileWriter:
                          size_x, size_y, size_z, pose_x, pose_y, pose_z,
                          launch_lat, launch_lon, origin_elevation,
                          include_buildings, output_dir,
-                         texture_size=None, include_helipad=False, helipad_height=5.0):
+                         texture_size=None, include_helipad=False, helipad_height=5.0,
+                         spawn_poses=None):
         '''
         Write model.config and {model_name}.world into output_dir.
 
@@ -32,6 +34,10 @@ class FileWriter:
             output_dir (str): Root model directory (flat — all assets live here).
             texture_size (float|None): UV size for aerial texture; defaults to max(size_x, size_y).
             include_helipad (bool): Whether to include a helipad at world origin.
+            spawn_poses (list|None): Multi-spawn poses from GazeboTerrainGenerator.get_spawn_poses().
+                When given, one helipad is placed per pose that has one (instead of the single
+                helipad at the origin), each pose becomes a world-level <frame>, and
+                spawn_points.json is written. None keeps the single-spawn output.
         '''
         texture_size_val = texture_size if texture_size is not None else max(size_x, size_y)
         camera_z = round(size_z + pose_z + 200, 1)
@@ -49,8 +55,18 @@ class FileWriter:
         else:
             buildings_sdf_block = ""
 
+        # Elevation of the world origin written to <spherical_coordinates>. A helipad
+        # at the origin raises it by helipad_height (unchanged single-spawn behaviour).
+        world_origin_elevation = origin_elevation + (helipad_height if include_helipad else 0)
+
         # --- Helipad block ---
-        if include_helipad:
+        if spawn_poses:
+            # Multi-spawn: one helipad per spawn point that has one (primary keeps its name)
+            helipad_block = '\n'.join(
+                helipad_include(p["helipad"], p["x"], p["y"], p["z"], p["yaw"])
+                for p in spawn_poses if p.get("helipad")
+            )
+        elif include_helipad:
             helipad_block = (
                 f'        <include>\n'
                 f'            <name>{model_name}_helipad</name>\n'
@@ -63,6 +79,19 @@ class FileWriter:
             helipad_block = ""
 
         os.makedirs(output_dir, exist_ok=True)
+
+        # --- Spawn frames + spawn_points.json (multi-spawn) ---
+        spawn_frames_block = frames_block(spawn_poses) if spawn_poses else ""
+        # Drop the marker's whole line when empty so the single-spawn world is unchanged
+        sdf_template = (sdf_template
+            .replace("$SPAWN_FRAMES$\n", spawn_frames_block + "\n" if spawn_frames_block else "")
+            .replace("$SPAWN_FRAMES$", spawn_frames_block))
+        spawn_json = os.path.join(output_dir, 'spawn_points.json')
+        if spawn_poses:
+            write_spawn_points_json(output_dir, model_name, spawn_poses, launch_lat, launch_lon,
+                                    world_origin_elevation, include_helipad, helipad_height)
+        elif os.path.isfile(spawn_json):
+            os.remove(spawn_json)
 
         # --- Write model.config ---
         model_config = (FileWriter.read_template(
@@ -85,7 +114,7 @@ class FileWriter:
             .replace("$HELIPAD$", helipad_block)
             .replace("$ORIGIN_LAT$", str(launch_lat))
             .replace("$ORIGIN_LONG$", str(launch_lon))
-            .replace("$ORIGIN_ELEVATION$", str(origin_elevation + (helipad_height if include_helipad else 0)))
+            .replace("$ORIGIN_ELEVATION$", str(world_origin_elevation))
             .replace("$CAMERA_Z$", str(camera_z)))
         with open(os.path.join(output_dir, model_name + ".world"), "w") as f:
             f.write(sdf_template)
