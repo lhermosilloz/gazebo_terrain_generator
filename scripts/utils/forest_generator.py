@@ -10,7 +10,7 @@ Pipeline (all pure Python / NumPy / OpenCV, no Blender):
    patch size follow.
 2. Exclusions: building footprints (buildings.geojson), roads and water (the
    cached Mapbox streets-v8 vector tiles in building_tiles/), the area outside
-   the drawn polygon, and a clear zone around the spawn point.
+   the drawn polygon, and a clear zone around every spawn point.
 3. Placement: Poisson-disk style dart throwing inside the mask at the requested
    density, plus one tree in every isolated canopy patch that got none. Above
    max_trees, 80% of the budget keeps full density nearest the spawn point and
@@ -124,7 +124,7 @@ class ForestGenerator:
                  output_dir, origin_lat=None, origin_lon=None, texture_size=None,
                  buildings_geojson=None, vector_tiles_dir=None,
                  density=DEFAULT_DENSITY, max_trees=DEFAULT_MAX_TREES, spawn_xy=(0.0, 0.0), seed=1234,
-                 progress=None):
+                 progress=None, extra_spawn_xy=()):
         """
         Args:
             aerial_path (str): mesh/aerial.png (square, padded with gray 128).
@@ -143,6 +143,8 @@ class ForestGenerator:
             spawn_xy (tuple): world xy kept clear of trunks.
             seed (int): random seed, so the same inputs give the same forest.
             progress (callable|None): receives human-readable status lines.
+            extra_spawn_xy (iterable): world xy of additional spawn points (multi-spawn), kept
+                clear like spawn_xy. The tree cap still keeps full density around spawn_xy only.
         """
         self.aerial_path = aerial_path
         self.heightmap = np.asarray(heightmap, dtype=np.float32)
@@ -158,6 +160,8 @@ class ForestGenerator:
         self.density = max(0.0, float(density))
         self.max_trees = max(0, int(max_trees))
         self.spawn_xy = (float(spawn_xy[0]), float(spawn_xy[1]))
+        # Every point that gets the spawn clear zone (the primary first)
+        self.clear_xy = [self.spawn_xy] + [(float(x), float(y)) for x, y in extra_spawn_xy]
         self.rng = np.random.default_rng(seed)
         self._progress = progress
         # North-west corner of the terrain = origin of the texture
@@ -358,10 +362,11 @@ class ForestGenerator:
             k = self._kernel(2 * self.WATER_BANK_M, mpp)
             excl |= cv2.erode(water_area, k) if k is not None else water_area
 
-        # Spawn clear zone
-        u, v = self.world_to_px(self.spawn_xy[0], self.spawn_xy[1], mpp)
-        cv2.circle(excl, (int(round(float(u))), int(round(float(v)))),
-                   int(math.ceil(self.SPAWN_CLEARANCE_M / mpp)), 1, -1)
+        # Spawn clear zone around every spawn point (and its helipad)
+        for sx, sy in self.clear_xy:
+            u, v = self.world_to_px(sx, sy, mpp)
+            cv2.circle(excl, (int(round(float(u))), int(round(float(v)))),
+                       int(math.ceil(self.SPAWN_CLEARANCE_M / mpp)), 1, -1)
         self.stats['excluded_features'] = counts
         return excl
 
@@ -369,6 +374,7 @@ class ForestGenerator:
         """Roads, waterways and water areas from cached streets-v8 tiles ({z}/{x}/{y}.json)."""
         import mercantile
         from utils.building_downloader import BuildingDownloader
+        from utils.road_smoother import road_width_m as smoothed_road_width_m
         converter = BuildingDownloader()
         for path in sorted(glob.glob(os.path.join(self.vector_tiles_dir, '*', '*', '*.json'))):
             try:
@@ -391,7 +397,10 @@ class ForestGenerator:
                         cls = props.get('class', '')
                         if cls in self.ROAD_SKIP_CLASSES or props.get('structure') == 'tunnel':
                             continue
-                        width = self.ROAD_WIDTH_M.get(cls, self.ROAD_DEFAULT_WIDTH_M) + 2 * self.ROAD_MARGIN_M
+                        # Never narrower than the corridor road smoothing flattens for this
+                        # road, so no trunk stands on a smoothed carriageway
+                        width = max(self.ROAD_WIDTH_M.get(cls, self.ROAD_DEFAULT_WIDTH_M),
+                                    smoothed_road_width_m(props) or 0.0) + 2 * self.ROAD_MARGIN_M
                         kind = 'roads'
                     elif layer_name == 'waterway':
                         width = self.WATERWAY_WIDTH_M.get(props.get('class', ''), 2.0)
@@ -544,7 +553,7 @@ class ForestGenerator:
         # --- sizes: crowns follow the local canopy width
         edge_m = dist[iv, iu] * mpp
         crown = np.minimum(edge_m + 0.5, np.asarray(acc_cap)) * rng.uniform(0.85, 1.15, len(u))
-        to_spawn = np.hypot(x - self.spawn_xy[0], y - self.spawn_xy[1])
+        to_spawn = np.min([np.hypot(x - sx, y - sy) for sx, sy in self.clear_xy], axis=0)
         crown = np.minimum(crown, to_spawn - self.SPAWN_CROWN_CLEARANCE_M)
         crown = np.clip(crown, self.CROWN_MIN_M, self.CROWN_MAX_M)
 

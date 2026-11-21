@@ -146,6 +146,9 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
         self.roads_smooth = roads_smooth
         self.roads_smoothing_length = roads_smoothing_length
         self.roads_shoulder_width = roads_shoulder_width
+        # Spawn poses, computed once from the final heightmap by generate_gazebo_world()
+        # so that the trees and the world file use the same poses
+        self._spawn_poses_cache = None
         with open(os.path.join(self.tile_path, 'metadata.json')) as f:
             data = json.load(f)
             self.boundaries = data["bounds"]
@@ -208,7 +211,7 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
         template_file = 'gazebo_fortress_world_template.sdf' if self.gazebo_version == 'fortress' else 'gazebo_world_template.sdf'
         template = FileWriter.read_template(os.path.join(GlobalParam.TEMPLATE_DIR_PATH, template_file))
         launch_cord = self.get_launch_location()
-        spawn_poses = self.get_spawn_poses(size_x, size_y, size_z, pose_x, pose_y, pose_z, launch_cord)
+        spawn_poses = self.get_cached_spawn_poses(size_x, size_y, size_z, pose_x, pose_y, pose_z, launch_cord)
         FileWriter.write_world_file(
             template,
             self.model_name,
@@ -225,6 +228,13 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
             spawn_poses=spawn_poses,
             include_trees=self.include_trees,
         )
+
+    def get_cached_spawn_poses(self, size_x, size_y, size_z, pose_x, pose_y, pose_z, launch=None):
+        """get_spawn_poses(), computed once per generation (trees and world file share it)."""
+        key = (size_x, size_y, size_z, pose_x, pose_y, pose_z)
+        if self._spawn_poses_cache is None or self._spawn_poses_cache[0] != key:
+            self._spawn_poses_cache = (key, self.get_spawn_poses(size_x, size_y, size_z, pose_x, pose_y, pose_z, launch))
+        return self._spawn_poses_cache[1]
 
     def get_spawn_poses(self, size_x, size_y, size_z, pose_x, pose_y, pose_z, launch=None):
         """
@@ -439,6 +449,10 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
         bound_array = self.boundaries.split(',')
         origin_lat = (float(bound_array[1]) + float(bound_array[3])) / 2
         origin_lon = (float(bound_array[0]) + float(bound_array[2])) / 2
+        # Multi-spawn: keep every additional spawn point (and its helipad) clear of trees
+        # too; the primary is the world origin, ForestGenerator's spawn_xy default
+        spawn_poses = self.get_cached_spawn_poses(size_x, size_y, size_z, pose_x, pose_y, pose_z) or []
+        extra_spawn_xy = [(p["x"], p["y"]) for p in spawn_poses if not p["primary"]]
         forest = ForestGenerator(
             os.path.join(self.tile_path, 'mesh', 'aerial.png'),
             self.heightmap, self.heightmap_z_resolution,
@@ -452,6 +466,7 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
             density=self.trees_density,
             max_trees=self.trees_max_count,
             progress=progress,
+            extra_spawn_xy=extra_spawn_xy,
         )
         try:
             return forest.run()
@@ -511,7 +526,6 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
                 self.generate_trees(size_x, size_y, size_z, pose_x, pose_y, pose_z, progress)
 
             self.report_ground_friction(progress)
-
 
             progress("Writing world file...")
             self.gen_world(size_x, size_y, size_z, pose_x, pose_y, pose_z)
