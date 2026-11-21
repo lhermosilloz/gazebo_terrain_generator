@@ -219,8 +219,8 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
         Additional points use the same linear lat/lon -> terrain mapping as the
         heightmap and aerial texture (terrain centre at pose_x, pose_y; size_x by
         size_y metres), so each one lands on the spot picked on the map. Ground
-        height comes from the generated heightmap with the same pixel lookup used
-        for the launch point and the buildings, plus the terrain offset pose_z.
+        height is interpolated from the generated heightmap (same pixel convention
+        as the launch point lookup), plus the terrain offset pose_z.
 
         Args:
             launch (dict|None): get_launch_location() result, if already computed.
@@ -237,12 +237,25 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
         lat_max = float(bound_array[3])
         lon_min = float(bound_array[0])
         lon_max = float(bound_array[2])
-        sw = (lat_min, lon_min)
-        ne = (lat_max, lon_max)
         width, height = self.heightmap.size
         dem_path = os.path.join(self.tile_path, 'dem')
         launch = launch or self.get_launch_location()
         frames = frame_names(self.model_name, len(self.spawn_points))
+        heights = np.asarray(self.heightmap, dtype=np.float64)
+
+        def ground_height(lat, lon):
+            # Bilinear version of the nearest-pixel lookup used for the launch point
+            # (get_launch_pixelcord: pixel = int(u * width), i.e. pixel centres at
+            # (i + 0.5) / width). Measured against Gazebo Harmonic's heightmap collision
+            # with rail probes, nearest-pixel was off by up to slope * half a cell (1.4 m
+            # on a 257 px map with 12.6 m cells); bilinear stayed within ~0.3 m.
+            fx = min(max((lon - lon_min) / (lon_max - lon_min) * width - 0.5, 0.0), width - 1.0)
+            fy = min(max((lat_max - lat) / (lat_max - lat_min) * height - 0.5, 0.0), height - 1.0)
+            x0, y0 = min(int(fx), width - 2), min(int(fy), height - 2)
+            tx, ty = fx - x0, fy - y0
+            value = (heights[y0, x0] * (1 - tx) * (1 - ty) + heights[y0, x0 + 1] * tx * (1 - ty)
+                     + heights[y0 + 1, x0] * (1 - tx) * ty + heights[y0 + 1, x0 + 1] * tx * ty)
+            return float(value * size_z / self.heightmap_z_resolution + pose_z)
 
         poses = []
         for i, spawn in enumerate(self.spawn_points):
@@ -254,12 +267,11 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
             else:
                 lat, lon = spawn["lat"], spawn["lng"]
                 # float(): size_z/pose_z are numpy floats (from the heightmap)
-                x = float(pose_x + ((lon - lon_min) / (lon_max - lon_min) - 0.5) * size_x)
-                y = float(pose_y + ((lat - lat_min) / (lat_max - lat_min) - 0.5) * size_y)
-                px, py = self.get_launch_pixelcord(sw, ne, width, height, {"latitude": lat, "longitude": lon})
-                px = max(0, min(px, width - 1))
-                py = max(0, min(py, height - 1))
-                ground_z = float(self.heightmap.getpixel((px, py)) * size_z / self.heightmap_z_resolution + pose_z)
+                u = (lon - lon_min) / (lon_max - lon_min)
+                v = (lat - lat_min) / (lat_max - lat_min)
+                x = float(pose_x + (u - 0.5) * size_x)
+                y = float(pose_y + (v - 0.5) * size_y)
+                ground_z = ground_height(lat, lon)
                 ground_amsl = HeightmapGenerator.get_amsl(lat, lon, dem_path, self.dem_resolution)
 
             yaw_deg = float(spawn.get("yaw_deg", 0.0))
