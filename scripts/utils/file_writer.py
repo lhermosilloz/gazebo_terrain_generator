@@ -119,6 +119,12 @@ class FileWriter:
             f.write(model_config)
 
         # --- Write world file (terrain model inlined) ---
+        # Drop the line of an empty optional block (and the blank line after $TREES$), so a
+        # world without ground friction or trees is written exactly as before those features
+        if not friction_block:
+            sdf_template = sdf_template.replace("$GROUND_FRICTION$\n", "")
+        if not trees_sdf_block:
+            sdf_template = sdf_template.replace("$TREES$\n\n", "")
         sdf_template = (sdf_template
             .replace("$MODELNAME$", model_name)
             .replace("$SIZEX$", str(size_x))
@@ -174,8 +180,8 @@ class FileWriter:
         return (
             f'            <!-- Ground friction (mu = {mu_text}). Gazebo\'s DART physics ignores <surface><friction>\n'
             f'                 on heightmap and mesh collisions, so the GroundFriction system plugin applies it\n'
-            f'                 to the terrain and buildings of this model; collisions that set their own friction\n'
-            f'                 (e.g. the helipad) keep it. Each contact uses the lower of the two mu.\n'
+            f'                 to the terrain, buildings and tree trunks of this model; collisions that set their\n'
+            f'                 own friction (e.g. the helipad) keep it. Each contact uses the lower of the two mu.\n'
             f'                 Build it once from gazebo_plugins/ground_friction in gazebo_terrain_generator.\n'
             f'                 Without it Gazebo logs "Failed to load system plugin" and keeps mu = 1. -->\n'
             f'            <plugin filename="{FileWriter.GROUND_FRICTION_PLUGIN_FILE}" name="{FileWriter.GROUND_FRICTION_PLUGIN_NAME}">\n'
