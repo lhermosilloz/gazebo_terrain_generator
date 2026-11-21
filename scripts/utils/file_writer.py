@@ -1,3 +1,4 @@
+import math
 import os
 from utils.param import GlobalParam
 
@@ -14,7 +15,8 @@ class FileWriter:
                          size_x, size_y, size_z, pose_x, pose_y, pose_z,
                          launch_lat, launch_lon, origin_elevation,
                          include_buildings, output_dir,
-                         texture_size=None, include_helipad=False, helipad_height=5.0):
+                         texture_size=None, include_helipad=False, helipad_height=5.0,
+                         friction_coefficient=None):
         '''
         Write model.config and {model_name}.world into output_dir.
 
@@ -32,6 +34,8 @@ class FileWriter:
             output_dir (str): Root model directory (flat — all assets live here).
             texture_size (float|None): UV size for aerial texture; defaults to max(size_x, size_y).
             include_helipad (bool): Whether to include a helipad at world origin.
+            friction_coefficient (float|None): Ground friction coefficient (mu) applied by the
+                GroundFriction system plugin; None keeps Gazebo's default friction.
         '''
         texture_size_val = texture_size if texture_size is not None else max(size_x, size_y)
         camera_z = round(size_z + pose_z + 200, 1)
@@ -62,6 +66,9 @@ class FileWriter:
         else:
             helipad_block = ""
 
+        # --- Ground friction block ---
+        friction_block = FileWriter.ground_friction_block(friction_coefficient)
+
         os.makedirs(output_dir, exist_ok=True)
 
         # --- Write model.config ---
@@ -83,9 +90,46 @@ class FileWriter:
             .replace("$TEXTURE_SIZE$", str(texture_size_val))
             .replace("$BUILDING$", buildings_sdf_block)
             .replace("$HELIPAD$", helipad_block)
+            .replace("$GROUND_FRICTION$", friction_block)
             .replace("$ORIGIN_LAT$", str(launch_lat))
             .replace("$ORIGIN_LONG$", str(launch_lon))
             .replace("$ORIGIN_ELEVATION$", str(origin_elevation + (helipad_height if include_helipad else 0)))
             .replace("$CAMERA_Z$", str(camera_z)))
         with open(os.path.join(output_dir, model_name + ".world"), "w") as f:
             f.write(sdf_template)
+
+    # --- Ground friction (roadmap: "Friction components to the ground") ---
+    # gz-sim's DART physics ignores <surface><friction> on heightmap and mesh
+    # collisions, so the coefficient is applied by a small system plugin
+    # (gazebo_plugins/ground_friction) attached to the terrain model.
+    GROUND_FRICTION_PLUGIN_FILE = "GroundFriction"
+    GROUND_FRICTION_PLUGIN_NAME = "gazebo_terrain_generator::GroundFriction"
+
+    @staticmethod
+    def ground_friction_block(friction_coefficient):
+        '''
+        SDF that sets the friction of the collisions in the terrain model (heightmap,
+        buildings and anything else nested in it). Collisions that declare their own
+        <surface><friction><ode><mu>, such as the Fuel helipad, keep it.
+
+        Args:
+            friction_coefficient (float|None): Coulomb friction coefficient (mu), used for
+                both friction directions. None returns "" so the world keeps Gazebo's default.
+        '''
+        if friction_coefficient is None:
+            return ""
+        mu = float(friction_coefficient)
+        if not math.isfinite(mu) or mu < 0:
+            raise ValueError(f"Friction coefficient must be a finite number >= 0, got {friction_coefficient!r}")
+        return (
+            f'            <!-- Ground friction (mu = {mu:g}). Gazebo\'s DART physics ignores <surface><friction>\n'
+            f'                 on heightmap and mesh collisions, so the GroundFriction system plugin applies it\n'
+            f'                 to the terrain and buildings of this model; collisions that set their own friction\n'
+            f'                 (e.g. the helipad) keep it. Each contact uses the lower of the two mu.\n'
+            f'                 Build it once from gazebo_plugins/ground_friction in gazebo_terrain_generator.\n'
+            f'                 Without it Gazebo logs "Failed to load system plugin" and keeps mu = 1. -->\n'
+            f'            <plugin filename="{FileWriter.GROUND_FRICTION_PLUGIN_FILE}" name="{FileWriter.GROUND_FRICTION_PLUGIN_NAME}">\n'
+            f'                <mu>{mu:g}</mu>\n'
+            f'                <mu2>{mu:g}</mu2>\n'
+            f'            </plugin>'
+        )

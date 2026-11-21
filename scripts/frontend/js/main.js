@@ -25,7 +25,10 @@
         tileSource: 'https://mt0.google.com/vt?lyrs=s&x={x}&s=&y={y}&z={z}',
         parallelDownloads: 4,
         gazeboVersion: 'harmonic',
-        targetHeightmapSize: 'auto'
+        targetHeightmapSize: 'auto',
+        // Ground friction: 'default' keeps Gazebo's default friction (mu = 1)
+        frictionPreset: 'default',
+        frictionCoefficient: 1
     };
 
     const config = loadConfig();
@@ -83,6 +86,7 @@
         document.getElementById('setting-parallel-downloads').value = config.parallelDownloads;
         document.getElementById('setting-gazebo-version').value = config.gazeboVersion;
         document.getElementById('setting-target-heightmap-size').value = config.targetHeightmapSize;
+        applyFrictionConfigToForm();
         updateMapboxKeyStatus(loadMapboxKey());
 
         const matchedSource = TILE_SOURCES.find(s => s && s.url === config.tileSource);
@@ -892,6 +896,8 @@
             startData.append('includeHelipad', config.includeHelipad);
             startData.append('helipadHeight', config.helipadHeight);
             startData.append('gazeboVersion', config.gazeboVersion);
+            startData.append('frictionPreset', config.frictionPreset);
+            startData.append('frictionCoefficient', config.frictionCoefficient);
             startData.append('source', source);
             const startResp = await fetch('/start-download', { method: 'POST', body: startData });
             const startResult = await startResp.json();
@@ -942,6 +948,8 @@
             endData.append('helipadHeight', config.helipadHeight);
             endData.append('gazeboVersion', config.gazeboVersion);
             endData.append('targetHeightmapSize', config.targetHeightmapSize);
+            endData.append('frictionPreset', config.frictionPreset);
+            endData.append('frictionCoefficient', config.frictionCoefficient);
             endData.append('mapboxApiKey', mapboxApiKey);
             const endResp = await fetch('/end-download', { method: 'POST', body: endData });
             const endResult = await endResp.json();
@@ -1266,6 +1274,8 @@
             renderEstimateInfo(lastEstimateResult);
         });
 
+        setupFrictionSettings();
+
         document.getElementById('setting-mapbox-key-btn').addEventListener('click', function () {
             openApikeyModal(function (key) {
                 mapboxApiKey = key;
@@ -1281,6 +1291,73 @@
             if (gridVisible) { showGrid(); }
             // Note: API key is intentionally not cleared by revert
         });
+    }
+
+    // --- Ground friction (roadmap: "Friction components to the ground") ---
+    // Presets live in index.html as <option data-mu="...">. 'default' sends no
+    // coefficient to the world (Gazebo keeps mu = 1); any other choice makes the
+    // server add the GroundFriction system plugin to the terrain model.
+
+    function applyFrictionConfigToForm() {
+        const presetSelect = document.getElementById('setting-friction-preset');
+        const muInput = document.getElementById('setting-friction-coefficient');
+        presetSelect.value = config.frictionPreset;
+        if (presetSelect.value !== config.frictionPreset) {
+            // Unknown preset saved by another version: fall back to Gazebo's default
+            config.frictionPreset = 'default';
+            config.frictionCoefficient = DEFAULT_CONFIG.frictionCoefficient;
+            presetSelect.value = 'default';
+        }
+        muInput.value = config.frictionCoefficient;
+        muInput.disabled = config.frictionPreset === 'default';
+        updateFrictionNote();
+    }
+
+    function updateFrictionNote() {
+        const note = document.getElementById('setting-friction-note');
+        const isFortress = document.getElementById('setting-gazebo-version').value === 'fortress';
+        if (config.frictionPreset === 'default') {
+            note.style.display = 'none';
+            return;
+        }
+        note.textContent = isFortress
+            ? 'Not supported for Fortress: the world keeps Gazebo\'s default friction.'
+            : 'Gazebo ignores friction set on heightmaps, so the world loads the GroundFriction plugin. ' +
+              'Build it once from gazebo_plugins/ground_friction, or Gazebo keeps mu = 1.';
+        note.style.display = '';
+    }
+
+    function setupFrictionSettings() {
+        const presetSelect = document.getElementById('setting-friction-preset');
+        const muInput = document.getElementById('setting-friction-coefficient');
+
+        presetSelect.addEventListener('change', function () {
+            config.frictionPreset = this.value;
+            const presetMu = this.selectedOptions[0] && this.selectedOptions[0].dataset.mu;
+            if (presetMu !== undefined) {
+                config.frictionCoefficient = parseFloat(presetMu);
+            }
+            applyFrictionConfigToForm();
+            saveConfig();
+        });
+
+        muInput.addEventListener('change', function () {
+            const mu = parseFloat(this.value);
+            if (!Number.isFinite(mu) || mu < 0) {
+                this.value = config.frictionCoefficient;
+                return;
+            }
+            config.frictionCoefficient = mu;
+            const selected = presetSelect.selectedOptions[0];
+            if (!selected || selected.dataset.mu === undefined || parseFloat(selected.dataset.mu) !== mu) {
+                config.frictionPreset = 'custom';
+            }
+            applyFrictionConfigToForm();
+            saveConfig();
+        });
+
+        // The note depends on the target Gazebo version
+        document.getElementById('setting-gazebo-version').addEventListener('change', updateFrictionNote);
     }
 
     // --- Tile utilities ---
