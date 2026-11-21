@@ -559,6 +559,10 @@
 
     // Handle keyboard events
     function handleKeyPress(e) {
+        // Backspace/Delete while typing in a field (search box, settings, spawn yaw)
+        // edits that field; it must not delete the selected polygon vertex
+        const target = e.target;
+        if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
         if (e.key === 'Delete' || e.key === 'Backspace') {
             if (selectedVertex) {
                 e.preventDefault();
