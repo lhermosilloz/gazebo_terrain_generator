@@ -1347,6 +1347,9 @@
         map.on('draw.create', refreshSpawnPoints);
         map.on('draw.update', refreshSpawnPoints);
         map.on('draw.delete', refreshSpawnPoints);
+        // draw.create fires while Draw is still in draw_polygon mode, when
+        // getSpawnPolygon() ignores the polygon; re-check once the mode has changed
+        map.on('draw.modechange', refreshSpawnPoints);
         centerMarker.on('drag', updateSpawnListCoords);
         centerMarker.on('dragend', refreshSpawnPoints);
         releasePolygonOnPress(centerMarker.getElement());
