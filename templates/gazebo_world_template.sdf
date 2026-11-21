@@ -295,6 +295,7 @@
         <model name="$MODELNAME$">
             <static>true</static>
             <pose>0 0 0 0 0 0</pose>
+$GROUND_FRICTION$
 
             <link name="ground">
                 <collision name="collision">

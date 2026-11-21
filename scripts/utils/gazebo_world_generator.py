@@ -116,7 +116,7 @@ class OrthoGenerator(ConcatImage):
 
 
 class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
-    def __init__(self, tile_path: str, include_buildings: bool, heightmap_z_resolution: int, gazebo_version: str, target_heightmap_size: int, include_helipad: bool = False, helipad_height: float = 5.0, **kwargs):
+    def __init__(self, tile_path: str, include_buildings: bool, heightmap_z_resolution: int, gazebo_version: str, target_heightmap_size: int, include_helipad: bool = False, helipad_height: float = 5.0, friction_coefficient: float = None, **kwargs):
         super().__init__(**kwargs)
         self.tile_path = tile_path
         self.include_buildings = include_buildings
@@ -125,6 +125,8 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
         self.heightmap_z_resolution = heightmap_z_resolution
         self.gazebo_version = gazebo_version
         self.target_heightmap_size = target_heightmap_size
+        # Ground friction coefficient (mu); None keeps Gazebo's default friction.
+        self.friction_coefficient = friction_coefficient
         with open(os.path.join(self.tile_path, 'metadata.json')) as f:
             data = json.load(f)
             self.boundaries = data["bounds"]
@@ -199,6 +201,7 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
             self.tile_path,
             include_helipad=self.include_helipad,
             helipad_height=self.helipad_height,
+            friction_coefficient=self.get_ground_friction(),
         )
 
     def get_launch_pixelcord(self, south_west_bound, north_east_bound, width, height, launch_location):
@@ -340,5 +343,50 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
                 geojson_to_dae = GeoJSONToDAE(street_map, output_dae_file)
                 geojson_to_dae.run(origin_coord, size_z, pose_z, self.heightmap, self.heightmap_z_resolution, polygon_bounds)
 
+            self.report_ground_friction(progress)
+
             progress("Writing world file...")
             self.gen_world(size_x, size_y, size_z, pose_x, pose_y, pose_z)
+
+    # --- Ground friction (roadmap: "Friction components to the ground") ---
+    def get_ground_friction(self):
+        """
+        Friction coefficient to write into the world, or None for Gazebo's default.
+
+        The coefficient is applied by the GroundFriction system plugin, which is built
+        against gz-sim 8 (Harmonic), so Fortress worlds always keep the default.
+        """
+        if self.friction_coefficient is None or self.gazebo_version == 'fortress':
+            return None
+        return self.friction_coefficient
+
+    def report_ground_friction(self, progress):
+        """Tell the user what the ground friction setting needs to take effect."""
+        if self.friction_coefficient is None:
+            return
+        if self.gazebo_version == 'fortress':
+            progress("Ground friction is only supported for Gazebo Harmonic; "
+                     "this Fortress world keeps Gazebo's default friction.")
+        elif find_ground_friction_plugin() is None:
+            progress(f"Ground friction (mu = {FileWriter.format_friction(self.friction_coefficient)}) needs the GroundFriction "
+                     "plugin, which Gazebo can't find on this machine (GZ_SIM_SYSTEM_PLUGIN_PATH or "
+                     "~/.gz/sim/plugins). Build it from gazebo_plugins/ground_friction; until then "
+                     "Gazebo uses its default friction.")
+        else:
+            progress(f"Ground friction set to mu = {FileWriter.format_friction(self.friction_coefficient)}.")
+
+
+def find_ground_friction_plugin():
+    """
+    Path of the GroundFriction plugin library if gz-sim would find it here
+    (GZ_SIM_SYSTEM_PLUGIN_PATH or ~/.gz/sim/plugins), else None.
+    """
+    lib_names = [f"lib{FileWriter.GROUND_FRICTION_PLUGIN_FILE}{ext}" for ext in ('.so', '.dylib')]
+    search_dirs = [d for d in os.environ.get('GZ_SIM_SYSTEM_PLUGIN_PATH', '').split(os.pathsep) if d]
+    search_dirs.append(os.path.join(os.path.expanduser('~'), '.gz', 'sim', 'plugins'))
+    for directory in search_dirs:
+        for lib_name in lib_names:
+            candidate = os.path.join(directory, lib_name)
+            if os.path.isfile(candidate):
+                return candidate
+    return None

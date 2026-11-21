@@ -5,6 +5,7 @@ import threading
 import os
 import io
 import json
+import math
 import shutil
 import zipfile
 from pathlib import Path
@@ -36,7 +37,27 @@ def compute_auto_heightmap_size(bounds, dem_resolution):
 	return HeightmapGenerator.get_nearest_map_size(natural_max)
 
 
-def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height):
+# --- Ground friction (roadmap: "Friction components to the ground") ---
+def parse_friction(postvars):
+	"""
+	Read the ground friction form fields.
+
+	Returns (preset, mu): mu is None for the 'default' preset, which keeps Gazebo's
+	default friction. Raises ValueError for a coefficient that is not a finite number >= 0.
+	"""
+	preset = postvars.get('frictionPreset', 'default') or 'default'
+	if preset == 'default':
+		return preset, None
+	try:
+		mu = float(postvars.get('frictionCoefficient', ''))
+	except ValueError:
+		raise ValueError(f"Friction coefficient must be a number, got {postvars.get('frictionCoefficient')!r}")
+	if not math.isfinite(mu) or mu < 0:
+		raise ValueError(f"Friction coefficient must be a finite number >= 0, got {mu}")
+	return preset, mu
+
+
+def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height, friction_coefficient=None):
 	global task_status
 
 	def progress(msg):
@@ -69,7 +90,7 @@ def process_end_download(map_name, bounds, zoom_level, dem_resolution, include_b
 			progress("Downloading building footprint data...")
 			download_streetmap_data(true_boundaries, os.path.join(map_dir, 'building_tiles'), map_dir, api_key=api_key, polygon_vertices=polygon_vertices)
 
-		terrain_generator = GazeboTerrainGenerator(map_dir, include_buildings, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad=include_helipad, helipad_height=helipad_height)
+		terrain_generator = GazeboTerrainGenerator(map_dir, include_buildings, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad=include_helipad, helipad_height=helipad_height, friction_coefficient=friction_coefficient)
 		terrain_generator.generate_gazebo_world(progress_cb=progress)
 
 		for cleanup_dir in ('tiles', 'dem', 'building_tiles'):
@@ -140,6 +161,10 @@ def start_download():
 	gazebo_version = postvars.get('gazeboVersion', 'harmonic')
 	target_heightmap_size_raw = postvars.get('targetHeightmapSize', 'auto')
 	dem_resolution = min(zoom_level, GlobalParam.DEM_RESOLUTION)
+	try:
+		friction_preset, friction_coefficient = parse_friction(postvars)
+	except ValueError as e:
+		return jsonify({"code": 400, "message": str(e)})
 
 
 	output_dir = get_map_dir(map_name)
@@ -160,6 +185,8 @@ def start_download():
 		"helipad_height": helipad_height,
 		"gazebo_version": gazebo_version,
 		"target_heightmap_size_setting": target_heightmap_size_raw,
+		"friction_preset": friction_preset,
+		"friction_coefficient": friction_coefficient,
 		"timestamp": timestamp,
 	}
 	with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
@@ -184,6 +211,10 @@ def end_download():
 	heightmap_z_resolution = 255 if gazebo_version == 'fortress' else 65535
 	api_key = postvars.get('mapboxApiKey', '')
 	dem_resolution = min(zoom_level, GlobalParam.DEM_RESOLUTION)
+	try:
+		_, friction_coefficient = parse_friction(postvars)
+	except ValueError as e:
+		return jsonify({"code": 400, "message": str(e)})
 
 	target_heightmap_size_raw = postvars.get('targetHeightmapSize', 'auto')
 	if target_heightmap_size_raw == 'auto':
@@ -191,7 +222,7 @@ def end_download():
 	else:
 		target_heightmap_size = int(target_heightmap_size_raw)
 
-	thread = threading.Thread(target=process_end_download, args=(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height))
+	thread = threading.Thread(target=process_end_download, args=(map_name, bounds, zoom_level, dem_resolution, include_buildings, polygon_vertices, api_key, heightmap_z_resolution, gazebo_version, target_heightmap_size, include_helipad, helipad_height, friction_coefficient))
 	thread.start()
 
 	return jsonify({"code": 200, "message": "Download ended"})
