@@ -368,12 +368,12 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
             progress("Ground friction is only supported for Gazebo Harmonic; "
                      "this Fortress world keeps Gazebo's default friction.")
         elif find_ground_friction_plugin() is None:
-            progress(f"Ground friction (mu = {self.friction_coefficient:g}) needs the GroundFriction "
+            progress(f"Ground friction (mu = {FileWriter.format_friction(self.friction_coefficient)}) needs the GroundFriction "
                      "plugin, which Gazebo can't find on this machine (GZ_SIM_SYSTEM_PLUGIN_PATH or "
                      "~/.gz/sim/plugins). Build it from gazebo_plugins/ground_friction; until then "
                      "Gazebo uses its default friction.")
         else:
-            progress(f"Ground friction set to mu = {self.friction_coefficient:g}.")
+            progress(f"Ground friction set to mu = {FileWriter.format_friction(self.friction_coefficient)}.")
 
 
 def find_ground_friction_plugin():

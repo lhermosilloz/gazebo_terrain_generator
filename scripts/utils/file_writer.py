@@ -106,6 +106,14 @@ class FileWriter:
     GROUND_FRICTION_PLUGIN_NAME = "gazebo_terrain_generator::GroundFriction"
 
     @staticmethod
+    def format_friction(friction_coefficient):
+        '''
+        Shortest text that reads back as exactly the same coefficient (0.1, 0.1234567,
+        1e-05), unlike '%g', which rounds to 6 significant digits. -0 is written as 0.0.
+        '''
+        return repr(float(friction_coefficient) + 0.0)
+
+    @staticmethod
     def ground_friction_block(friction_coefficient):
         '''
         SDF that sets the friction of the collisions in the terrain model (heightmap,
@@ -121,15 +129,16 @@ class FileWriter:
         mu = float(friction_coefficient)
         if not math.isfinite(mu) or mu < 0:
             raise ValueError(f"Friction coefficient must be a finite number >= 0, got {friction_coefficient!r}")
+        mu_text = FileWriter.format_friction(mu)
         return (
-            f'            <!-- Ground friction (mu = {mu:g}). Gazebo\'s DART physics ignores <surface><friction>\n'
+            f'            <!-- Ground friction (mu = {mu_text}). Gazebo\'s DART physics ignores <surface><friction>\n'
             f'                 on heightmap and mesh collisions, so the GroundFriction system plugin applies it\n'
             f'                 to the terrain and buildings of this model; collisions that set their own friction\n'
             f'                 (e.g. the helipad) keep it. Each contact uses the lower of the two mu.\n'
             f'                 Build it once from gazebo_plugins/ground_friction in gazebo_terrain_generator.\n'
             f'                 Without it Gazebo logs "Failed to load system plugin" and keeps mu = 1. -->\n'
             f'            <plugin filename="{FileWriter.GROUND_FRICTION_PLUGIN_FILE}" name="{FileWriter.GROUND_FRICTION_PLUGIN_NAME}">\n'
-            f'                <mu>{mu:g}</mu>\n'
-            f'                <mu2>{mu:g}</mu2>\n'
+            f'                <mu>{mu_text}</mu>\n'
+            f'                <mu2>{mu_text}</mu2>\n'
             f'            </plugin>'
         )
