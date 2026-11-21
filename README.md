@@ -24,39 +24,33 @@ A super easy-to-use tool for generating 3D Gazebo terrain using real-world eleva
 - **Mapbox API Key** — Required for satellite imagery, elevation data, and geocoding. Sign up at [mapbox.com](https://www.mapbox.com/), copy your public token (`pk.eyJ1...`), then paste it in the web UI under **Settings → Mapbox API Key**.
   > Your token is stored in the browser only never server-side.
 
-- **Python package manager (`uv`)** — Required to run the project.
-
-  <details>
-  <summary>Linux / macOS</summary>
+- **Python 3.12 or newer** with the `venv` module. On Ubuntu/Debian, `venv` comes in a separate package:
 
   ```bash
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+  sudo apt install python3-venv
   ```
-
-  </details>
-
-  <details>
-  <summary>Windows (PowerShell)</summary>
-
-  ```powershell
-  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-  ```
-
-  </details>
 
 
 ## 🛠️ Setup
 
-Clone the repo, install dependencies, and start the server:
+Clone the repo, create a virtual environment, install the dependencies, and start the server:
 
 ```bash
 git clone https://github.com/your-org/gazebo_terrain_generator.git
 cd gazebo_terrain_generator
-uv sync
-uv run scripts/server.py
+python3 -m venv .venv
+source .venv/bin/activate
+pip install $(python -c "import tomllib; print(*tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies'], sep='\n')")
+python scripts/server.py
 ```
 
+The `pip install` line reads the dependency list from `pyproject.toml` and installs it.
+
+On Windows (PowerShell), use `python` instead of `python3` and activate with `.venv\Scripts\Activate.ps1`; the other commands are the same.
+
 Open [http://localhost:8080](http://localhost:8080) in your browser.
+
+Each time you open a new terminal, activate the environment again (`source .venv/bin/activate`) before starting the server.
 
 
 ## 🚀 Generate a World

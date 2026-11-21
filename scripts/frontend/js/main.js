@@ -119,6 +119,13 @@
             const key = input.value.trim();
             if (!key) return;
 
+            // Mapbox GL refuses secret tokens, even though they pass the validation request below
+            if (key.startsWith('sk.')) {
+                errorEl.textContent = 'This is a secret token (sk.…). The map needs a public token, which starts with pk.';
+                errorEl.style.display = 'block';
+                return;
+            }
+
             confirmBtn.disabled = true;
             confirmBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Validating...';
             errorEl.style.display = 'none';
@@ -132,20 +139,23 @@
                 } else if (!resp.ok) {
                     throw new Error(`Validation failed (HTTP ${resp.status}).`);
                 }
-                overlay.classList.remove('open');
-                saveMapboxKey(key);
-                updateMapboxKeyStatus(key);
-                if (onSave) onSave(key);
             } catch (e) {
                 const msg = (e instanceof TypeError)
                     ? 'Could not reach Mapbox API - check if your key is valid and make sure you are connected to internet.'
                     : e.message;
                 errorEl.textContent = msg;
                 errorEl.style.display = 'block';
+                return;
             } finally {
                 confirmBtn.disabled = false;
                 confirmBtn.innerHTML = '<i class="fas fa-check"></i> Save';
             }
+
+            // Outside the try: an error from onSave must not be written into the modal we just closed
+            overlay.classList.remove('open');
+            saveMapboxKey(key);
+            updateMapboxKeyStatus(key);
+            if (onSave) onSave(key);
         }
 
         function cancel() {
@@ -171,6 +181,8 @@
     // Initialize the application
     async function init() {
         mapboxApiKey = loadMapboxKey();
+        // A secret token saved earlier can't be used by Mapbox GL; ask for a public one
+        if (mapboxApiKey.startsWith('sk.')) mapboxApiKey = '';
         updateMapboxKeyStatus(mapboxApiKey);
 
         if (mapboxApiKey) {
@@ -198,12 +210,19 @@
 
     // Initialize Mapbox map
     function initializeMap() {
-        map = new mapboxgl.Map({
-            container: 'map',
-            style: 'mapbox://styles/mapbox/satellite-streets-v12',
-            center: [-122.4194, 37.7749], // Default: San Francisco
-            zoom: 12
-        });
+        try {
+            map = new mapboxgl.Map({
+                container: 'map',
+                style: 'mapbox://styles/mapbox/satellite-streets-v12',
+                center: [-122.4194, 37.7749], // Default: San Francisco
+                zoom: 12
+            });
+        } catch (e) {
+            // The constructor throws synchronously, e.g. when WebGL is unavailable
+            map = null;
+            showError('Could not create the map: ' + e.message);
+            return;
+        }
 
         // Add navigation controls
         map.addControl(new mapboxgl.NavigationControl(), 'top-right');
@@ -239,10 +258,23 @@
 
         });
 
+        // Failed tile requests repeat on every pan/zoom; toast each kind once and log the rest
+        const shownMapErrors = new Set();
         map.on('error', function (e) {
             console.error('Map error:', e);
-            const errorMsg = e.error?.message || e.message || 'Unknown error';
-            showError('Unexpected runtime error: ' + errorMsg);
+            const err = e.error || {};
+            let errorMsg = err.message || e.message || '';
+            let key = errorMsg;
+            if (err.status) {
+                // HTTP failure: Mapbox GL uses the response statusText as the message,
+                // which is empty over HTTP/2, so report the status and URL (without the token)
+                const url = (err.url || '').split('?')[0];
+                errorMsg = `HTTP ${err.status} loading ${url}${errorMsg ? ' (' + errorMsg + ')' : ''}`;
+                key = `${err.status} ${e.sourceId || url.replace(/\/\d+\/\d+\/\d+.*$/, '')}`;
+            }
+            if (shownMapErrors.has(key)) return;
+            shownMapErrors.add(key);
+            showError('Map error: ' + (errorMsg || 'Unknown error'));
         });
     }
 
