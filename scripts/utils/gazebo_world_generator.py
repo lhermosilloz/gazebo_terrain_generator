@@ -257,6 +257,13 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
                      + heights[y0 + 1, x0] * (1 - tx) * ty + heights[y0 + 1, x0 + 1] * tx * ty)
             return float(value * size_z / self.heightmap_z_resolution + pose_z)
 
+        # Gazebo Harmonic's heightmap collision (DART) stops about half a heightmap
+        # cell short of the terrain edges (measured: nothing under a probe 6 m inside
+        # the edge of a 257 px map with 12.6 m cells), so a robot spawned there falls
+        # out of the world. Keep additional spawn points one cell inside the edges.
+        edge_u = min(1.0 / (width - 1), 0.5)
+        edge_v = min(1.0 / (height - 1), 0.5)
+
         poses = []
         for i, spawn in enumerate(self.spawn_points):
             primary = i == 0
@@ -269,6 +276,15 @@ class GazeboTerrainGenerator(HeightmapGenerator, OrthoGenerator):
                 # float(): size_z/pose_z are numpy floats (from the heightmap)
                 u = (lon - lon_min) / (lon_max - lon_min)
                 v = (lat - lat_min) / (lat_max - lat_min)
+                u_in = min(max(u, edge_u), 1 - edge_u)
+                v_in = min(max(v, edge_v), 1 - edge_v)
+                if (u_in, v_in) != (u, v):
+                    moved = math.hypot((u_in - u) * size_x, (v_in - v) * size_y)
+                    print(f"Spawn point {i + 1} is within one heightmap cell of the terrain edge, "
+                          f"too close for Gazebo's heightmap collision; moved it {moved:.1f} m inward")
+                    u, v = u_in, v_in
+                    lon = lon_min + u * (lon_max - lon_min)
+                    lat = lat_min + v * (lat_max - lat_min)
                 x = float(pose_x + (u - 0.5) * size_x)
                 y = float(pose_y + (v - 0.5) * size_y)
                 ground_z = ground_height(lat, lon)
