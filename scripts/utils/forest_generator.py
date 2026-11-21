@@ -797,7 +797,8 @@ class ForestGenerator:
         img = cv2.imread(self.aerial_path, cv2.IMREAD_COLOR)
         if img is None:
             raise FileNotFoundError(f"Cannot read {self.aerial_path}")
-        n_src = img.shape[1]
+        src_h, src_w = img.shape[:2]
+        n_src = src_w
         mpp = self.texture_size / n_src
         scale = min(1.0, self.PROC_MAX_DIM / n_src, mpp / self.PROC_MIN_MPP)
         if scale < 1.0:
@@ -839,6 +840,10 @@ class ForestGenerator:
         paths = self.output_paths()
         os.makedirs(os.path.dirname(paths['mask_png']), exist_ok=True)
         mask_png = np.where(canopy > 0, 255, np.where(veg > 0, 128, 0)).astype(np.uint8)
+        if mask_png.shape[:2] != (src_h, src_w):
+            # Keep the documented contract (same pixel grid as aerial.png) when the texture
+            # was downsampled for processing
+            mask_png = cv2.resize(mask_png, (src_w, src_h), interpolation=cv2.INTER_NEAREST_EXACT)
         cv2.imwrite(paths['mask_png'], mask_png)
         del mask_png
 
