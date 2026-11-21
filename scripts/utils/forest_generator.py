@@ -460,6 +460,10 @@ class ForestGenerator:
         n_canopy_px = len(flat)
         area_m2 = n_canopy_px * mpp * mpp
         n_target = int(round(self.density * area_m2 / 1e4))
+        if n_canopy_px and self.density > 0:
+            # A little canopy at a low density rounds to zero trees; plant at least one so the
+            # patch seeding below still gives every isolated canopy patch a tree
+            n_target = max(n_target, 1)
         cap_hit = n_target > self.max_trees
         self.stats.update(canopy_area_ha=round(area_m2 / 1e4, 2), target_trees=n_target, cap_hit=cap_hit)
         if n_target <= 0 or self.max_trees <= 0 or n_canopy_px == 0:
