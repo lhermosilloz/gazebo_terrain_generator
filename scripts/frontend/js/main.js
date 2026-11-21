@@ -34,7 +34,11 @@
         // Smooth roads: flatten road corridors in the heightmap
         roadsSmooth: true,
         roadsSmoothingLength: 80,
-        roadsShoulderWidth: 4
+        roadsShoulderWidth: 4,
+        // Trees: forest from the satellite texture's vegetation mask
+        treesEnabled: true,
+        treesDensity: 150,
+        treesMaxCount: 20000
     };
 
     const config = loadConfig();
@@ -94,6 +98,7 @@
         document.getElementById('setting-target-heightmap-size').value = config.targetHeightmapSize;
         applyFrictionConfigToForm();
         applyRoadsConfigToForm();
+        applyTreesConfigToForm();
         updateMapboxKeyStatus(loadMapboxKey());
 
         const matchedSource = TILE_SOURCES.find(s => s && s.url === config.tileSource);
@@ -922,6 +927,7 @@
             startData.append('spawnPoints', spawnPointsJson);
             startData.append('spawnHelipadAll', config.spawnHelipadAll);
             appendRoadsSettings(startData);
+            appendTreesFormData(startData);
             const startResp = await fetch('/start-download', { method: 'POST', body: startData });
             const startResult = await startResp.json();
             if (startResult.code !== 200) throw new Error('start-download failed: ' + startResult.message);
@@ -977,6 +983,7 @@
             endData.append('spawnPoints', spawnPointsJson);
             endData.append('spawnHelipadAll', config.spawnHelipadAll);
             appendRoadsSettings(endData);
+            appendTreesFormData(endData);
             const endResp = await fetch('/end-download', { method: 'POST', body: endData });
             const endResult = await endResp.json();
             if (endResult.code !== 200) throw new Error('end-download failed');
@@ -1207,6 +1214,56 @@
         }
     }
 
+    // --- Trees (forest from vegetation masks): settings helpers ---
+
+    const TREES_DENSITY_MIN = 1;
+    const TREES_DENSITY_MAX = 1000;
+    const TREES_MAX_COUNT_MAX = 200000;
+
+    function clampNumber(value, min, max, fallback) {
+        if (value === null || String(value).trim() === '') return fallback;
+        const n = Number(value);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.min(Math.max(n, min), max);
+    }
+
+    function applyTreesConfigToForm() {
+        document.getElementById('setting-trees-enabled').checked = config.treesEnabled;
+        document.getElementById('setting-trees-density').value = config.treesDensity;
+        document.getElementById('setting-trees-max-count').value = config.treesMaxCount;
+        const display = config.treesEnabled ? '' : 'none';
+        document.getElementById('setting-trees-density-field').style.display = display;
+        document.getElementById('setting-trees-max-count-field').style.display = display;
+    }
+
+    function appendTreesFormData(formData) {
+        formData.append('treesEnabled', config.treesEnabled);
+        formData.append('treesDensity', config.treesDensity);
+        formData.append('treesMaxCount', config.treesMaxCount);
+    }
+
+    function setupTreesSettings() {
+        document.getElementById('setting-trees-enabled').addEventListener('change', function () {
+            config.treesEnabled = this.checked;
+            applyTreesConfigToForm();
+            saveConfig();
+        });
+
+        document.getElementById('setting-trees-density').addEventListener('change', function () {
+            config.treesDensity = clampNumber(this.value, TREES_DENSITY_MIN, TREES_DENSITY_MAX, DEFAULT_CONFIG.treesDensity);
+            this.value = config.treesDensity;
+            saveConfig();
+        });
+
+        document.getElementById('setting-trees-max-count').addEventListener('change', function () {
+            config.treesMaxCount = Math.round(clampNumber(this.value, 0, TREES_MAX_COUNT_MAX, DEFAULT_CONFIG.treesMaxCount));
+            this.value = config.treesMaxCount;
+            saveConfig();
+        });
+    }
+
+    // --- end Trees ---
+
     // Setup settings panel
     function setupSettingsPanel() {
         // Populate dropdowns from backend before applying saved config
@@ -1303,6 +1360,8 @@
         setupFrictionSettings();
 
         setupRoadsSettings();
+
+        setupTreesSettings();
 
         document.getElementById('setting-mapbox-key-btn').addEventListener('click', function () {
             openApikeyModal(function (key) {

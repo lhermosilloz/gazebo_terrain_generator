@@ -17,7 +17,7 @@ class FileWriter:
                          launch_lat, launch_lon, origin_elevation,
                          include_buildings, output_dir,
                          texture_size=None, include_helipad=False, helipad_height=5.0,
-                         friction_coefficient=None, spawn_poses=None):
+                         friction_coefficient=None, spawn_poses=None, include_trees=False):
         '''
         Write model.config and {model_name}.world into output_dir.
 
@@ -41,6 +41,8 @@ class FileWriter:
                 When given, one helipad is placed per pose that has one (instead of the single
                 helipad at the origin), each pose becomes a world-level <frame>, and
                 spawn_points.json is written. None keeps the single-spawn output.
+            include_trees (bool): Whether to include the procedural forest (mesh/trees.dae,
+                written by ForestGenerator) in the world.
         '''
         texture_size_val = texture_size if texture_size is not None else max(size_x, size_y)
         camera_z = round(size_z + pose_z + 200, 1)
@@ -84,6 +86,16 @@ class FileWriter:
         # --- Ground friction block ---
         friction_block = FileWriter.ground_friction_block(friction_coefficient)
 
+        # --- Trees block (forest from the vegetation mask) ---
+        trees_dae = os.path.join(output_dir, 'mesh', 'trees.dae')
+        trees_collision_dae = os.path.join(output_dir, 'mesh', 'trees_collision.dae')
+        if include_trees and os.path.isfile(trees_dae) and os.path.isfile(trees_collision_dae):
+            trees_sdf_block = (FileWriter.read_template(
+                os.path.join(GlobalParam.TEMPLATE_DIR_PATH, 'trees_template.sdf'))
+                .replace("$MODELNAME$", model_name))
+        else:
+            trees_sdf_block = ""
+
         os.makedirs(output_dir, exist_ok=True)
 
         # --- Spawn frames + spawn_points.json (multi-spawn) ---
@@ -117,6 +129,7 @@ class FileWriter:
             .replace("$POSZ$", str(pose_z))
             .replace("$TEXTURE_SIZE$", str(texture_size_val))
             .replace("$BUILDING$", buildings_sdf_block)
+            .replace("$TREES$", trees_sdf_block)
             .replace("$HELIPAD$", helipad_block)
             .replace("$GROUND_FRICTION$", friction_block)
             .replace("$ORIGIN_LAT$", str(launch_lat))

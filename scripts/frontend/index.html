@@ -178,6 +178,27 @@
                             </div>
                         </div>
 
+                        <!-- Trees: forest generated from the satellite texture's vegetation mask -->
+                        <div id="trees-settings">
+                            <div class="settings-field settings-field--row">
+                                <label for="setting-trees-enabled">Include Trees <i class="fas fa-circle-info tooltip-icon" data-tooltip="Plants low-poly trees where the satellite texture shows tree canopy. Lawns, buildings, roads, water and the spawn point are kept clear. Trunks have collision; crowns are visual only."></i></label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="setting-trees-enabled" checked>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="settings-field" id="setting-trees-density-field">
+                                <label for="setting-trees-density">Tree Density (per hectare) <i class="fas fa-circle-info tooltip-icon" data-tooltip="Trees per hectare of detected canopy. 150 gives a closed-looking forest; lower it for open woodland. Every isolated canopy patch still gets one tree."></i></label>
+                                <input type="number" id="setting-trees-density" value="150" min="1" max="1000" step="1">
+                            </div>
+
+                            <div class="settings-field" id="setting-trees-max-count-field">
+                                <label for="setting-trees-max-count">Max Trees <i class="fas fa-circle-info tooltip-icon" data-tooltip="Upper limit on the number of trees, to keep Gazebo responsive. If the area needs more, the trees nearest the spawn point keep full density, the rest of the forest is thinned, and the console says so."></i></label>
+                                <input type="number" id="setting-trees-max-count" value="20000" min="0" max="200000" step="1000">
+                            </div>
+                        </div>
+
                         <div class="settings-field settings-field--row">
                             <label>Mapbox API Key <i class="fas fa-circle-info tooltip-icon" data-tooltip="Required for satellite imagery, elevation data, and geocoding. Stored in your browser only - never sent to this server."></i></label>
                             <button id="setting-mapbox-key-btn" class="mapbox-key-btn">
